@@ -35,7 +35,7 @@ Two immersion circuits are exposed:
 | **zones.read** | 49/11 | C→S | — | — | `[{ZT,CN,ZN,ZNM},…]` | — | Topology: two zones observed. |
 | **time.tick** | 2/103 | C→S | — | `[ <DTS> ]` | `0` | — | Keepalive/clock tick used in bursts. |
 | **schedules.summary** | 5/1 | C→S | — | — | `{"V":[{"I":1,"SI":16,"V":[{"ALI","OR","AB","TS"}…]}]}` | — | Program overview (aliases/last‑updated). |
-| **device.metadata.read** | 17/11 | C→S | — | — | e.g., `{"BOI":1,"UI":1,"N":"Boiler","SN":"E0031158","FV":"E7P0P09","MD":2,"AS":-1,"LUT":...}` | — | Device info. |
+| **device.metadata.read** | 17/11 | C→S | — | — | e.g., `{"BOI":1,"UI":1,"N":"<friendlyName>","SN":"<serialNumber>","FV":"<firmwareVersion>","MD":2,"AS":-1,"LUT":...}` | — | Device info. |
 | **device.config.read** | 14/11 | C→S | — | — | `{"V":[{"BOI":1,"SI":16,"V":[{"CI":1,"CV":50},{"CI":2,"CV":300},{"CI":4,"CV":1}]}]}` | — | Key/value config entries. |
 | **state.read** | 3/1 | C→S | — | — | `{"V":[{"I":1,"SI":33,…},{"I":2,"SI":16,…}]}` | — | Live state for primary & boost blocks. |
 | **energy.history.read** | 9/36 | C→S | — | `[ <windowIndex> ]` | `[{ "I":0, "D":[ {T, OP, BP, OS, OA, BS, BA}, … ]}]` | — | `OP/BP` **kWh**; `OS/OA/BS/BA` **minutes** (÷60 → hours). |
