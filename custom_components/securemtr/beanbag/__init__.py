@@ -65,6 +65,14 @@ class BeanbagSession:
     gateways: tuple[BeanbagGateway, ...]
 
 
+@dataclass(slots=True)
+class BeanbagStateSnapshot:
+    """Represent the parsed result of a live state query."""
+
+    payload: dict[str, Any]
+    primary_power_on: bool | None
+
+
 class BeanbagHttpClient:
     """Perform REST interactions with the Beanbag API."""
 
@@ -358,6 +366,148 @@ class BeanbagBackend:
         )
         return response
 
+    async def read_zone_topology(
+        self,
+        session: BeanbagSession,
+        websocket: ClientWebSocketResponse,
+        gateway_id: str,
+    ) -> list[dict[str, Any]]:
+        """Retrieve the configured immersion zones for the gateway."""
+
+        response = await self._send_request(
+            session,
+            websocket,
+            gateway_id,
+            header_hi=49,
+            header_si=11,
+        )
+
+        if not isinstance(response, list):
+            raise BeanbagWebSocketError(
+                "Beanbag zones payload did not contain a list"
+            )
+
+        zones: list[dict[str, Any]] = []
+        for entry in response:
+            if isinstance(entry, dict):
+                zones.append(entry)
+            else:
+                _LOGGER.debug(
+                    "Ignoring unexpected zone entry type %s", type(entry).__name__
+                )
+
+        _LOGGER.debug("Beanbag reported %s zones", len(zones))
+        return zones
+
+    async def sync_gateway_clock(
+        self,
+        session: BeanbagSession,
+        websocket: ClientWebSocketResponse,
+        gateway_id: str,
+        *,
+        timestamp: int | None = None,
+    ) -> None:
+        """Align the controller clock with the current epoch timestamp."""
+
+        epoch = int(time.time() if timestamp is None else timestamp)
+        response = await self._send_request(
+            session,
+            websocket,
+            gateway_id,
+            header_hi=2,
+            header_si=103,
+            args=[epoch],
+        )
+
+        if response not in (0, "0", None):
+            raise BeanbagWebSocketError(
+                f"Unexpected Beanbag clock acknowledgement: {response}"
+            )
+
+        _LOGGER.debug("Beanbag controller clock synchronised to %s", epoch)
+
+    async def read_schedule_overview(
+        self,
+        session: BeanbagSession,
+        websocket: ClientWebSocketResponse,
+        gateway_id: str,
+    ) -> dict[str, Any]:
+        """Fetch the summary of configured boost and heating schedules."""
+
+        response = await self._send_request(
+            session,
+            websocket,
+            gateway_id,
+            header_hi=5,
+            header_si=1,
+        )
+
+        if not isinstance(response, dict):
+            raise BeanbagWebSocketError(
+                "Beanbag schedule payload did not contain an object"
+            )
+
+        _LOGGER.debug(
+            "Received Beanbag schedule overview keys: %s",
+            sorted(response),
+        )
+        return response
+
+    async def read_device_configuration(
+        self,
+        session: BeanbagSession,
+        websocket: ClientWebSocketResponse,
+        gateway_id: str,
+    ) -> dict[str, Any]:
+        """Fetch controller configuration parameters via the WebSocket."""
+
+        response = await self._send_request(
+            session,
+            websocket,
+            gateway_id,
+            header_hi=14,
+            header_si=11,
+        )
+
+        if not isinstance(response, dict):
+            raise BeanbagWebSocketError(
+                "Beanbag configuration payload did not contain an object"
+            )
+
+        _LOGGER.debug(
+            "Received Beanbag configuration payload keys: %s",
+            sorted(response),
+        )
+        return response
+
+    async def read_live_state(
+        self,
+        session: BeanbagSession,
+        websocket: ClientWebSocketResponse,
+        gateway_id: str,
+    ) -> BeanbagStateSnapshot:
+        """Read the live state blocks and derive the primary power flag."""
+
+        response = await self._send_request(
+            session,
+            websocket,
+            gateway_id,
+            header_hi=3,
+            header_si=1,
+        )
+
+        if not isinstance(response, dict):
+            raise BeanbagWebSocketError(
+                "Beanbag live state payload did not contain an object"
+            )
+
+        primary_power = self._extract_primary_power(response)
+        _LOGGER.debug(
+            "Beanbag live state reports primary power %s",
+            "on" if primary_power else "off" if primary_power is False else "unknown",
+        )
+        return BeanbagStateSnapshot(payload=response, primary_power_on=primary_power)
+
     async def turn_controller_on(
         self,
         session: BeanbagSession,
@@ -401,6 +551,38 @@ class BeanbagBackend:
             raise BeanbagWebSocketError(
                 f"Unexpected Beanbag mode write acknowledgement: {response}"
             )
+
+    @staticmethod
+    def _extract_primary_power(state_payload: dict[str, Any]) -> bool | None:
+        """Return the primary power boolean from a live state payload."""
+
+        blocks = state_payload.get("V")
+        if not isinstance(blocks, list):
+            return None
+
+        for block in blocks:
+            if not isinstance(block, dict):
+                continue
+            if block.get("SI") != 33:
+                continue
+
+            items = block.get("V")
+            if not isinstance(items, list):
+                continue
+
+            for item in items:
+                if not isinstance(item, dict):
+                    continue
+                if item.get("I") != 6:
+                    continue
+
+                value = item.get("V")
+                if value == 2:
+                    return True
+                if value == 0:
+                    return False
+
+        return None
 
     async def _send_request(
         self,
@@ -476,6 +658,7 @@ __all__ = [
     "BeanbagHttpClient",
     "BeanbagLoginError",
     "BeanbagSession",
+    "BeanbagStateSnapshot",
     "BeanbagWebSocketClient",
     "BeanbagWebSocketError",
 ]

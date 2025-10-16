@@ -327,6 +327,395 @@ async def test_backend_read_device_metadata_validates_payload(
 
 
 @pytest.mark.asyncio
+async def test_backend_read_zone_topology_filters_entries(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Ensure non-dictionary entries are ignored from the zone list."""
+
+    session_data = BeanbagSession(
+        user_id=1,
+        session_id="abc",
+        token="jwt",
+        token_timestamp=None,
+        gateways=(),
+    )
+    expected_correlation = "abc-00000001"
+
+    class DummyWebSocket:
+        def __init__(self) -> None:
+            self.sent: list[dict[str, Any]] = []
+
+        async def send_json(self, payload: dict[str, Any]) -> None:
+            self.sent.append(payload)
+
+        async def receive_json(self) -> dict[str, Any]:
+            return {"I": expected_correlation, "R": [{"ZN": 1}, "ignored"]}
+
+    websocket = DummyWebSocket()
+    backend = BeanbagBackend(Mock())
+    monkeypatch.setattr(
+        "custom_components.securemtr.beanbag.secrets.randbits", lambda bits: 1
+    )
+    monkeypatch.setattr("custom_components.securemtr.beanbag.time.time", lambda: 1000)
+
+    zones = await backend.read_zone_topology(session_data, websocket, "gateway-1")
+
+    assert zones == [{"ZN": 1}]
+    assert websocket.sent
+    assert websocket.sent[0]["P"][0] == {"GMI": "gateway-1", "HI": 49, "SI": 11}
+
+
+@pytest.mark.asyncio
+async def test_backend_read_zone_topology_requires_list(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Raise when the zone payload is not a list."""
+
+    session_data = BeanbagSession(
+        user_id=1,
+        session_id="abc",
+        token="jwt",
+        token_timestamp=None,
+        gateways=(),
+    )
+    expected_correlation = "abc-00000001"
+
+    class DummyWebSocket:
+        async def send_json(self, payload: dict[str, Any]) -> None:
+            return None
+
+        async def receive_json(self) -> dict[str, Any]:
+            return {"I": expected_correlation, "R": {"not": "a list"}}
+
+    backend = BeanbagBackend(Mock())
+    monkeypatch.setattr(
+        "custom_components.securemtr.beanbag.secrets.randbits", lambda bits: 1
+    )
+    monkeypatch.setattr("custom_components.securemtr.beanbag.time.time", lambda: 1000)
+
+    with pytest.raises(BeanbagWebSocketError):
+        await backend.read_zone_topology(session_data, DummyWebSocket(), "gateway-1")
+
+
+@pytest.mark.asyncio
+async def test_backend_sync_gateway_clock_validates_ack(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Raise when the controller clock reply is not the expected acknowledgement."""
+
+    session_data = BeanbagSession(
+        user_id=1,
+        session_id="abc",
+        token="jwt",
+        token_timestamp=None,
+        gateways=(),
+    )
+    expected_correlation = "abc-00000001"
+
+    class DummyWebSocket:
+        async def send_json(self, payload: dict[str, Any]) -> None:
+            return None
+
+        async def receive_json(self) -> dict[str, Any]:
+            return {"I": expected_correlation, "R": 5}
+
+    backend = BeanbagBackend(Mock())
+    monkeypatch.setattr(
+        "custom_components.securemtr.beanbag.secrets.randbits", lambda bits: 1
+    )
+    monkeypatch.setattr("custom_components.securemtr.beanbag.time.time", lambda: 1234)
+
+    with pytest.raises(BeanbagWebSocketError):
+        await backend.sync_gateway_clock(session_data, DummyWebSocket(), "gateway-1")
+
+
+@pytest.mark.asyncio
+async def test_backend_sync_gateway_clock_accepts_ack(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Accept acknowledgement payloads that match vendor behaviour."""
+
+    session_data = BeanbagSession(
+        user_id=1,
+        session_id="abc",
+        token="jwt",
+        token_timestamp=None,
+        gateways=(),
+    )
+    expected_correlation = "abc-00000001"
+
+    class DummyWebSocket:
+        def __init__(self) -> None:
+            self.sent: list[dict[str, Any]] = []
+
+        async def send_json(self, payload: dict[str, Any]) -> None:
+            self.sent.append(payload)
+
+        async def receive_json(self) -> dict[str, Any]:
+            return {"I": expected_correlation, "R": 0}
+
+    websocket = DummyWebSocket()
+    backend = BeanbagBackend(Mock())
+    monkeypatch.setattr(
+        "custom_components.securemtr.beanbag.secrets.randbits", lambda bits: 1
+    )
+    monkeypatch.setattr("custom_components.securemtr.beanbag.time.time", lambda: 2468)
+
+    await backend.sync_gateway_clock(session_data, websocket, "gateway-1")
+
+    assert websocket.sent[0]["P"][1] == [2468]
+
+
+@pytest.mark.asyncio
+async def test_backend_read_schedule_overview_requires_object(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Raise when the schedule overview payload is not an object."""
+
+    session_data = BeanbagSession(
+        user_id=1,
+        session_id="abc",
+        token="jwt",
+        token_timestamp=None,
+        gateways=(),
+    )
+    expected_correlation = "abc-00000001"
+
+    class DummyWebSocket:
+        async def send_json(self, payload: dict[str, Any]) -> None:
+            return None
+
+        async def receive_json(self) -> dict[str, Any]:
+            return {"I": expected_correlation, "R": [1, 2, 3]}
+
+    backend = BeanbagBackend(Mock())
+    monkeypatch.setattr(
+        "custom_components.securemtr.beanbag.secrets.randbits", lambda bits: 1
+    )
+    monkeypatch.setattr("custom_components.securemtr.beanbag.time.time", lambda: 1000)
+
+    with pytest.raises(BeanbagWebSocketError):
+        await backend.read_schedule_overview(session_data, DummyWebSocket(), "gateway-1")
+
+
+@pytest.mark.asyncio
+async def test_backend_read_schedule_overview_returns_payload(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Return the schedule payload when the structure matches expectations."""
+
+    session_data = BeanbagSession(
+        user_id=1,
+        session_id="abc",
+        token="jwt",
+        token_timestamp=None,
+        gateways=(),
+    )
+    expected_correlation = "abc-00000001"
+
+    class DummyWebSocket:
+        def __init__(self) -> None:
+            self.sent: list[dict[str, Any]] = []
+
+        async def send_json(self, payload: dict[str, Any]) -> None:
+            self.sent.append(payload)
+
+        async def receive_json(self) -> dict[str, Any]:
+            return {"I": expected_correlation, "R": {"V": [1, 2, 3]}}
+
+    websocket = DummyWebSocket()
+    backend = BeanbagBackend(Mock())
+    monkeypatch.setattr(
+        "custom_components.securemtr.beanbag.secrets.randbits", lambda bits: 1
+    )
+    monkeypatch.setattr("custom_components.securemtr.beanbag.time.time", lambda: 1000)
+
+    payload = await backend.read_schedule_overview(
+        session_data, websocket, "gateway-1"
+    )
+
+    assert payload == {"V": [1, 2, 3]}
+
+
+@pytest.mark.asyncio
+async def test_backend_read_device_configuration_requires_object(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Raise when the configuration payload is not an object."""
+
+    session_data = BeanbagSession(
+        user_id=1,
+        session_id="abc",
+        token="jwt",
+        token_timestamp=None,
+        gateways=(),
+    )
+    expected_correlation = "abc-00000001"
+
+    class DummyWebSocket:
+        async def send_json(self, payload: dict[str, Any]) -> None:
+            return None
+
+        async def receive_json(self) -> dict[str, Any]:
+            return {"I": expected_correlation, "R": "not-a-dict"}
+
+    backend = BeanbagBackend(Mock())
+    monkeypatch.setattr(
+        "custom_components.securemtr.beanbag.secrets.randbits", lambda bits: 1
+    )
+    monkeypatch.setattr("custom_components.securemtr.beanbag.time.time", lambda: 1000)
+
+    with pytest.raises(BeanbagWebSocketError):
+        await backend.read_device_configuration(
+            session_data, DummyWebSocket(), "gateway-1"
+        )
+
+
+@pytest.mark.asyncio
+async def test_backend_read_device_configuration_returns_payload(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Return configuration payloads that match the documented format."""
+
+    session_data = BeanbagSession(
+        user_id=1,
+        session_id="abc",
+        token="jwt",
+        token_timestamp=None,
+        gateways=(),
+    )
+    expected_correlation = "abc-00000001"
+
+    class DummyWebSocket:
+        def __init__(self) -> None:
+            self.sent: list[dict[str, Any]] = []
+
+        async def send_json(self, payload: dict[str, Any]) -> None:
+            self.sent.append(payload)
+
+        async def receive_json(self) -> dict[str, Any]:
+            return {"I": expected_correlation, "R": {"V": []}}
+
+    websocket = DummyWebSocket()
+    backend = BeanbagBackend(Mock())
+    monkeypatch.setattr(
+        "custom_components.securemtr.beanbag.secrets.randbits", lambda bits: 1
+    )
+    monkeypatch.setattr("custom_components.securemtr.beanbag.time.time", lambda: 1000)
+
+    payload = await backend.read_device_configuration(
+        session_data, websocket, "gateway-1"
+    )
+
+    assert payload == {"V": []}
+
+
+def test_backend_extract_primary_power_variants() -> None:
+    """Cover edge cases for parsing the primary power flag."""
+
+    backend = BeanbagBackend(Mock())
+
+    assert backend._extract_primary_power({}) is None
+    assert backend._extract_primary_power({"V": ["not-dict"]}) is None
+    assert backend._extract_primary_power({"V": [{"SI": 10}]}) is None
+    assert backend._extract_primary_power({"V": [{"SI": 33, "V": "bad"}]}) is None
+    assert (
+        backend._extract_primary_power({"V": [{"SI": 33, "V": [{}]}]}) is None
+    )
+    assert (
+        backend._extract_primary_power({"V": [{"SI": 33, "V": [{"I": 99}]}]})
+        is None
+    )
+    assert (
+        backend._extract_primary_power(
+            {"V": [{"SI": 33, "V": [{"I": 6, "V": 2}]}]}
+        )
+        is True
+    )
+    assert (
+        backend._extract_primary_power(
+            {"V": [{"SI": 33, "V": ["skip", {"I": 6, "V": 0}]}]}
+        )
+        is False
+    )
+
+
+@pytest.mark.asyncio
+async def test_backend_read_live_state_parses_primary_power(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Parse the primary power flag from a live state payload."""
+
+    session_data = BeanbagSession(
+        user_id=1,
+        session_id="abc",
+        token="jwt",
+        token_timestamp=None,
+        gateways=(),
+    )
+    expected_correlation = "abc-00000001"
+
+    class DummyWebSocket:
+        def __init__(self) -> None:
+            self.sent: list[dict[str, Any]] = []
+
+        async def send_json(self, payload: dict[str, Any]) -> None:
+            self.sent.append(payload)
+
+        async def receive_json(self) -> dict[str, Any]:
+            payload = {
+                "I": expected_correlation,
+                "R": {"V": [{"SI": 33, "V": [{"I": 6, "V": 0}]}]},
+            }
+            return payload
+
+    websocket = DummyWebSocket()
+    backend = BeanbagBackend(Mock())
+    monkeypatch.setattr(
+        "custom_components.securemtr.beanbag.secrets.randbits", lambda bits: 1
+    )
+    monkeypatch.setattr("custom_components.securemtr.beanbag.time.time", lambda: 1000)
+
+    snapshot = await backend.read_live_state(session_data, websocket, "gateway-1")
+
+    assert snapshot.primary_power_on is False
+    assert snapshot.payload == {"V": [{"SI": 33, "V": [{"I": 6, "V": 0}]}]}
+    assert websocket.sent[0]["P"][0] == {"GMI": "gateway-1", "HI": 3, "SI": 1}
+
+
+@pytest.mark.asyncio
+async def test_backend_read_live_state_requires_object(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Raise when the live state payload is not an object."""
+
+    session_data = BeanbagSession(
+        user_id=1,
+        session_id="abc",
+        token="jwt",
+        token_timestamp=None,
+        gateways=(),
+    )
+    expected_correlation = "abc-00000001"
+
+    class DummyWebSocket:
+        async def send_json(self, payload: dict[str, Any]) -> None:
+            return None
+
+        async def receive_json(self) -> dict[str, Any]:
+            return {"I": expected_correlation, "R": []}
+
+    backend = BeanbagBackend(Mock())
+    monkeypatch.setattr(
+        "custom_components.securemtr.beanbag.secrets.randbits", lambda bits: 1
+    )
+    monkeypatch.setattr("custom_components.securemtr.beanbag.time.time", lambda: 1000)
+
+    with pytest.raises(BeanbagWebSocketError):
+        await backend.read_live_state(session_data, DummyWebSocket(), "gateway-1")
+
+
+@pytest.mark.asyncio
 async def test_backend_turn_controller_commands(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
