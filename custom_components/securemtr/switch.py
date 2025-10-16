@@ -57,9 +57,11 @@ class SecuremtrPowerSwitch(SwitchEntity):
 
         self._runtime = runtime
         self._controller = controller
-        identifier_slug = _slugify_identifier(controller.identifier)
+        serial_identifier = controller.serial_number or controller.identifier
+        identifier_slug = _slugify_identifier(serial_identifier)
+        serial_display = serial_identifier or DOMAIN
         self._attr_unique_id = f"{identifier_slug}_primary_power"
-        self._attr_name = f"{controller.name} {controller.identifier} Water Heater"
+        self._attr_name = f"Secure Meters E7+ {serial_display} Water Heater"
 
     @property
     def available(self) -> bool:
@@ -74,11 +76,12 @@ class SecuremtrPowerSwitch(SwitchEntity):
         """Return device registry information for the controller."""
 
         controller = self._controller
+        serial_identifier = controller.serial_number or controller.identifier
         return DeviceInfo(
-            identifiers={(DOMAIN, controller.identifier)},
+            identifiers={(DOMAIN, serial_identifier)},
             manufacturer="Secure Meters",
-            model=controller.model,
-            name=controller.name,
+            model=controller.model or "E7+",
+            name="E7+",
             sw_version=controller.firmware_version,
             serial_number=controller.serial_number,
         )
