@@ -65,7 +65,7 @@ def _create_runtime() -> tuple[SecuremtrRuntimeData, DummyBackend]:
     runtime.session = SimpleNamespace()
     runtime.websocket = SimpleNamespace()
     runtime.controller = SecuremtrController(
-        identifier="controller-1",
+        identifier="serial-1",
         name="E7+ Controller",
         gateway_id="gateway-1",
         serial_number="serial-1",
@@ -94,8 +94,8 @@ async def test_button_setup_creates_entity() -> None:
     assert len(entities) == 1
     button = entities[0]
     assert button.available
-    assert button.unique_id == "controller_1_primary_power"
-    assert button.device_info["identifiers"] == {(DOMAIN, "controller-1")}
+    assert button.unique_id == "serial_1_primary_power"
+    assert button.device_info["identifiers"] == {(DOMAIN, "serial-1")}
 
     await button.async_press()
     assert backend.on_calls == [(runtime.session, runtime.websocket, "gateway-1")]

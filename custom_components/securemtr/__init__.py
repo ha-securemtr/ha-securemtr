@@ -215,9 +215,20 @@ def _build_controller(
 ) -> SecuremtrController:
     """Translate metadata and gateway context into a controller object."""
 
+    serial_value = metadata.get("SN")
+    serial_candidate = (
+        str(serial_value).strip()
+        if isinstance(serial_value, (str, int, float))
+        else ""
+    )
+    serial_number = serial_candidate or None
+
+    gateway_serial_candidate = str(gateway.serial_number or "").strip()
+
     identifier_candidates = (
+        serial_candidate,
+        gateway_serial_candidate,
         str(metadata.get("BOI", "")).strip(),
-        str(metadata.get("SN", "")).strip(),
         str(gateway.gateway_id or "").strip(),
     )
 
@@ -227,15 +238,6 @@ def _build_controller(
 
     raw_name = metadata.get("N") or "SecureMTR Controller"
     name = str(raw_name).strip() or f"SecureMTR {identifier}"
-
-    serial_value = metadata.get("SN")
-    serial_number = (
-        str(serial_value).strip()
-        if isinstance(serial_value, (str, int, float))
-        else None
-    )
-    if serial_number == "":
-        serial_number = None
 
     firmware_value = metadata.get("FV")
     firmware_version = (
