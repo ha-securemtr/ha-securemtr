@@ -1,6 +1,6 @@
 [project]
 name = "ha-securemtr"
-version = "1.12.8"
+version = "0.0.1"
 description = "E7+ Secure Meters Smart Boiler Controller integration for Home Assistant"
 readme = "README.md"
 authors = [{ name = "ha-securemtr" }]
