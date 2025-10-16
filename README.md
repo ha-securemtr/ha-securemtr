@@ -13,8 +13,10 @@
 
 #  Home Assistant integration for E7+ Secure Meters Smart Boiler Controller
 
-
 [![Open your Home Assistant instance and open a repository inside the Home Assistant Community Store.](https://my.home-assistant.io/badges/hacs_repository.svg)](https://my.home-assistant.io/redirect/hacs_repository/?owner=ha-securemtr&repository=ha-securemtr)
 
+## Add the integration
+
+- Provide the same email address and password that you use with the Secure Controls mobile app when setting up the securemtr integration.
 
 *_Disclaimer: This repository is not in any way affiliated with Secure Meters (UK), the Secure Control system, Home Assistant or other referenced entities. This is an open community project to allow customers to use their electric water heater controllers with their own authorized credentials. Use at your own risk._*

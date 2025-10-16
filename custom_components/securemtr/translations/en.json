@@ -1,12 +1,15 @@
 {
   "config": {
+    "error": {
+      "password_too_long": "The Secure Controls mobile app only accepts passwords up to 12 characters."
+    },
     "abort": {
-      "already_configured": "SecureMTR is already configured."
+      "already_configured": "securemtr is already configured."
     },
     "step": {
       "user": {
-        "title": "SecureMTR account",
-        "description": "Enter the email address and password that you use with the SecureMTR mobile app.",
+        "title": "securemtr account",
+        "description": "Enter the email address and password that you use with the Secure Controls mobile app.",
         "data": {
           "email": "Email address",
           "password": "Password"
