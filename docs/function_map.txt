@@ -20,6 +20,9 @@ custom_components.securemtr.beanbag.BeanbagBackend.turn_controller_on: Send the 
 custom_components.securemtr.beanbag.BeanbagBackend.turn_controller_off: Send the WebSocket command to disable the primary immersion.
 custom_components.securemtr.beanbag.BeanbagBackend._set_primary_mode: Issue the documented primary mode write command.
 custom_components.securemtr.beanbag.BeanbagBackend._send_request: Send a request frame and await the matching response payload.
-custom_components.securemtr.button.async_setup_entry: Set up Secure Meters button entities for a config entry.
-custom_components.securemtr.button.SecuremtrPowerButton.async_press: Send a toggle command to the Secure Meters controller.
-custom_components.securemtr.button._slugify_identifier: Convert the controller identifier into a slug suitable for unique IDs.
+custom_components.securemtr.switch.async_setup_entry: Set up Secure Meters switch entities for a config entry.
+custom_components.securemtr.switch.SecuremtrPowerSwitch.is_on: Return whether the controller reports the primary power as on.
+custom_components.securemtr.switch.SecuremtrPowerSwitch.async_turn_on: Send an on command to the Secure Meters controller.
+custom_components.securemtr.switch.SecuremtrPowerSwitch.async_turn_off: Send an off command to the Secure Meters controller.
+custom_components.securemtr.switch.SecuremtrPowerSwitch._async_set_power_state: Drive the backend to the requested primary power state.
+custom_components.securemtr.switch._slugify_identifier: Convert the controller identifier into a slug suitable for unique IDs.

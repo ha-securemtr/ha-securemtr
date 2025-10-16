@@ -1,11 +1,11 @@
-"""Button entities for the Secure Meters water heater controller."""
+"""Switch entities for the Secure Meters water heater controller."""
 
 from __future__ import annotations
 
 import asyncio
 import logging
 
-from homeassistant.components.button import ButtonEntity
+from homeassistant.components.switch import SwitchEntity
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
 from homeassistant.exceptions import HomeAssistantError
@@ -25,7 +25,7 @@ async def async_setup_entry(
     entry: ConfigEntry,
     async_add_entities: AddEntitiesCallback,
 ) -> None:
-    """Set up Secure Meters button entities for a config entry."""
+    """Set up Secure Meters switch entities for a config entry."""
 
     runtime: SecuremtrRuntimeData = hass.data[DOMAIN][entry.entry_id]
 
@@ -42,24 +42,24 @@ async def async_setup_entry(
     if controller is None:
         raise HomeAssistantError("Secure Meters controller metadata was not available")
 
-    async_add_entities([SecuremtrPowerButton(runtime, controller)])
+    async_add_entities([SecuremtrPowerSwitch(runtime, controller)])
 
 
-class SecuremtrPowerButton(ButtonEntity):
-    """Represent a stateless power toggle for the Secure Meters controller."""
+class SecuremtrPowerSwitch(SwitchEntity):
+    """Represent a maintained power toggle for the Secure Meters controller."""
 
     _attr_should_poll = False
 
     def __init__(
         self, runtime: SecuremtrRuntimeData, controller: SecuremtrController
     ) -> None:
-        """Initialise the button entity with runtime context."""
+        """Initialise the switch entity with runtime context."""
 
         self._runtime = runtime
         self._controller = controller
         identifier_slug = _slugify_identifier(controller.identifier)
         self._attr_unique_id = f"{identifier_slug}_primary_power"
-        self._attr_name = f"{controller.name} {controller.identifier} power"
+        self._attr_name = f"{controller.name} {controller.identifier} Water Heater"
 
     @property
     def available(self) -> bool:
@@ -83,8 +83,24 @@ class SecuremtrPowerButton(ButtonEntity):
             serial_number=controller.serial_number,
         )
 
-    async def async_press(self) -> None:
-        """Send a toggle command to the Secure Meters controller."""
+    @property
+    def is_on(self) -> bool:
+        """Return whether the controller reports the primary power as on."""
+
+        return self._runtime.primary_power_on is True
+
+    async def async_turn_on(self, **kwargs: object) -> None:
+        """Send an on command to the Secure Meters controller."""
+
+        await self._async_set_power_state(True)
+
+    async def async_turn_off(self, **kwargs: object) -> None:
+        """Send an off command to the Secure Meters controller."""
+
+        await self._async_set_power_state(False)
+
+    async def _async_set_power_state(self, turn_on: bool) -> None:
+        """Drive the backend to the requested primary power state."""
 
         runtime = self._runtime
         controller = runtime.controller
@@ -93,8 +109,6 @@ class SecuremtrPowerButton(ButtonEntity):
 
         if controller is None or session is None or websocket is None:
             raise HomeAssistantError("Secure Meters controller is not connected")
-
-        turn_on = runtime.primary_power_on is not True
 
         async with runtime.command_lock:
             try:
@@ -117,6 +131,12 @@ class SecuremtrPowerButton(ButtonEntity):
                 ) from error
 
             runtime.primary_power_on = turn_on
+
+        hass = self.hass
+        if hass is None:
+            return
+
+        self.async_write_ha_state()
 
 
 def _slugify_identifier(identifier: str) -> str:

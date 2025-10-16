@@ -11,7 +11,7 @@
 [![Code style: Ruff](https://img.shields.io/badge/Code%20style-Ruff-4B32C3.svg)](https://docs.astral.sh/ruff/)
 
 
-#  Home Assistant integration for E7+ Secure Meters Smart Boiler Controller
+#  Home Assistant integration for E7+ Secure Meters Smart Water Heater Controller
 
 [![Open your Home Assistant instance and open a repository inside the Home Assistant Community Store.](https://my.home-assistant.io/badges/hacs_repository.svg)](https://my.home-assistant.io/redirect/hacs_repository/?owner=ha-securemtr&repository=ha-securemtr)
 
