@@ -7,7 +7,12 @@ from dataclasses import dataclass
 import logging
 from typing import Any
 
-from aiohttp import ClientError, ClientSession, ClientWebSocketResponse
+from aiohttp import (
+    ClientError,
+    ClientSession,
+    ClientWebSocketResponse,
+    ContentTypeError,
+)
 from yarl import URL
 
 _LOGGER = logging.getLogger(__name__)
@@ -64,7 +69,9 @@ class BeanbagHttpClient:
     async def login(self, email: str, password_digest: str) -> BeanbagSession:
         """Execute the documented Beanbag login flow."""
 
-        if not email:
+        normalized_email = email.strip()
+
+        if not normalized_email:
             raise ValueError("Email address must be provided for login")
 
         if len(password_digest) != 32 or not all(
@@ -77,18 +84,23 @@ class BeanbagHttpClient:
                 "OI": 1550005,
                 "P": password_digest,
                 "NT": "SetLogin",
-                "UEI": email,
+                "UEI": normalized_email,
             }
         }
         url = f"{self._base_url}{LOGIN_PATH}"
         headers = {"Request-id": REQUEST_ID}
 
-        _LOGGER.info("Starting Beanbag login request for %s", email)
+        _LOGGER.info("Starting Beanbag login request for %s", normalized_email)
 
         try:
             async with self._session.post(url, json=payload, headers=headers) as response:
-                body = await response.json(content_type=None)
                 status = response.status
+                try:
+                    body = await response.json(content_type=None)
+                except (ContentTypeError, ValueError) as error:
+                    raise BeanbagLoginError(
+                        "Beanbag login response was not valid JSON",
+                    ) from error
         except ClientError as error:
             raise BeanbagLoginError("Beanbag login request failed") from error
 
@@ -111,10 +123,32 @@ class BeanbagHttpClient:
 
         token_timestamp = data.get("JTT") if isinstance(data.get("JTT"), int) else None
 
-        gateways_raw: Iterable[dict[str, Any]] = data.get("GD") or []
+        gateways_field = data.get("GD")
+        gateway_payloads: list[dict[str, Any]] = []
+
+        if gateways_field is None:
+            gateways_raw: Iterable[dict[str, Any]] = ()
+        elif isinstance(gateways_field, Iterable) and not isinstance(
+            gateways_field, (str, bytes)
+        ):
+            for gateway in gateways_field:
+                if isinstance(gateway, dict):
+                    gateway_payloads.append(gateway)
+                else:
+                    _LOGGER.debug(
+                        "Ignoring Beanbag gateway entry with unexpected type: %s",
+                        type(gateway).__name__,
+                    )
+            gateways_raw = gateway_payloads
+        else:
+            _LOGGER.warning(
+                "Beanbag login payload contained invalid gateway collection; ignoring",
+            )
+            gateways_raw = ()
+
         gateways = tuple(self._parse_gateway(gateway) for gateway in gateways_raw)
 
-        _LOGGER.info("Beanbag login succeeded for %s", email)
+        _LOGGER.info("Beanbag login succeeded for %s", normalized_email)
 
         return BeanbagSession(
             user_id=user_id,

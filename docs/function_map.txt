@@ -4,7 +4,7 @@ custom_components.securemtr.__init__.async_setup_entry: Set up securemtr from a 
 custom_components.securemtr.__init__.async_unload_entry: Unload a securemtr config entry, cancelling tasks and closing the WebSocket.
 custom_components.securemtr.__init__._async_start_backend: Authenticate with Beanbag and establish the WebSocket connection.
 custom_components.securemtr.config_flow.SecuremtrConfigFlow.async_step_user: Handle the initial user configuration step, enforcing the Secure Controls 12-character password limit and storing the MD5 digest.
-custom_components.securemtr.beanbag.BeanbagHttpClient.login: Execute the documented Beanbag login flow.
+custom_components.securemtr.beanbag.BeanbagHttpClient.login: Execute the documented Beanbag login flow while sanitizing credentials and validating the response payload.
 custom_components.securemtr.beanbag.BeanbagHttpClient._parse_gateway: Translate raw gateway payload into an object.
 custom_components.securemtr.beanbag.BeanbagWebSocketClient.connect: Open the Beanbag WebSocket using the authenticated session.
 custom_components.securemtr.beanbag.BeanbagWebSocketClient._build_ws_url: Construct the WebSocket URL from the REST base.
