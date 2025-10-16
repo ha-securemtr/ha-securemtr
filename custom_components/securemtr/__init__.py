@@ -39,6 +39,7 @@ class SecuremtrRuntimeData:
     controller_ready: asyncio.Event = field(default_factory=asyncio.Event)
     command_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
     primary_power_on: bool | None = None
+    timed_boost_enabled: bool | None = None
     zone_topology: list[dict[str, Any]] | None = None
     schedule_overview: dict[str, Any] | None = None
     device_metadata: dict[str, Any] | None = None
@@ -246,6 +247,7 @@ async def _async_fetch_controller(
     )
     runtime.state_snapshot = state_snapshot
     runtime.primary_power_on = state_snapshot.primary_power_on
+    runtime.timed_boost_enabled = state_snapshot.timed_boost_enabled
 
     return _build_controller(metadata, gateway)
 

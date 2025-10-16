@@ -25,9 +25,11 @@ custom_components.securemtr.beanbag.BeanbagBackend.read_live_state: Read the liv
 custom_components.securemtr.beanbag.BeanbagBackend.read_weekly_program: Return the parsed weekly program for the selected zone.
 custom_components.securemtr.beanbag.BeanbagBackend.turn_controller_on: Send the WebSocket command to enable the primary immersion.
 custom_components.securemtr.beanbag.BeanbagBackend.turn_controller_off: Send the WebSocket command to disable the primary immersion.
+custom_components.securemtr.beanbag.BeanbagBackend.set_timed_boost_enabled: Toggle the timed boost feature flag via the Beanbag WebSocket.
 custom_components.securemtr.beanbag.BeanbagBackend.write_weekly_program: Send the weekly program update for the selected zone.
 custom_components.securemtr.beanbag.BeanbagBackend._set_primary_mode: Issue the documented primary mode write command.
 custom_components.securemtr.beanbag.BeanbagBackend._extract_primary_power: Return the primary power boolean from a live state payload.
+custom_components.securemtr.beanbag.BeanbagBackend._extract_timed_boost_flag: Return the timed boost enable flag from a live state payload.
 custom_components.securemtr.beanbag.BeanbagBackend._resolve_program_index: Translate the textual zone selector into the Beanbag index.
 custom_components.securemtr.beanbag.BeanbagBackend._parse_weekly_program: Convert the Beanbag wire format into a weekly program structure.
 custom_components.securemtr.beanbag.BeanbagBackend._parse_flat_program: Interpret a flattened seven-day transition list.
@@ -37,8 +39,14 @@ custom_components.securemtr.beanbag.BeanbagBackend._send_request: Send a request
 custom_components.securemtr.beanbag.DailyProgram.__post_init__: Validate and normalise minute triplets.
 custom_components.securemtr.beanbag.DailyProgram._coerce_triplet: Normalise a 3-slot minute collection.
 custom_components.securemtr.switch.async_setup_entry: Set up Secure Meters switch entities for a config entry.
+custom_components.securemtr.switch._SecuremtrBaseSwitch: Provide shared behaviour for Secure Meters switch entities.
 custom_components.securemtr.switch.SecuremtrPowerSwitch.is_on: Return whether the controller reports the primary power as on.
 custom_components.securemtr.switch.SecuremtrPowerSwitch.async_turn_on: Send an on command to the Secure Meters controller.
 custom_components.securemtr.switch.SecuremtrPowerSwitch.async_turn_off: Send an off command to the Secure Meters controller.
 custom_components.securemtr.switch.SecuremtrPowerSwitch._async_set_power_state: Drive the backend to the requested primary power state.
+custom_components.securemtr.switch.SecuremtrTimedBoostSwitch.is_on: Return whether timed boost is currently enabled.
+custom_components.securemtr.switch.SecuremtrTimedBoostSwitch.async_turn_on: Enable the timed boost feature in the backend.
+custom_components.securemtr.switch.SecuremtrTimedBoostSwitch.async_turn_off: Disable the timed boost feature in the backend.
+custom_components.securemtr.switch.SecuremtrTimedBoostSwitch._async_set_timed_boost: Drive the backend to the requested timed boost state.
 custom_components.securemtr.switch._slugify_identifier: Convert the controller identifier into a slug suitable for unique IDs.
+custom_components.securemtr.switch._build_device_info: Construct device registry metadata for the provided controller.
