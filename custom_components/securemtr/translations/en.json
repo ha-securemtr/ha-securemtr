@@ -1,0 +1,17 @@
+{
+  "config": {
+    "abort": {
+      "already_configured": "SecureMTR is already configured."
+    },
+    "step": {
+      "user": {
+        "title": "SecureMTR account",
+        "description": "Enter the email address and password that you use with the SecureMTR mobile app.",
+        "data": {
+          "email": "Email address",
+          "password": "Password"
+        }
+      }
+    }
+  }
+}
