@@ -642,7 +642,7 @@ async def test_async_fetch_controller_requires_connection() -> None:
 def test_build_controller_normalises_metadata() -> None:
     """Verify metadata parsing handles blank serial numbers and names."""
 
-    metadata = {"BOI": "", "SN": "", "N": "   ", "FV": 2, "MD": "E7+"}
+    metadata = {"BOI": "", "SN": "", "N": None, "FV": 2, "MD": "E7+"}
     gateway = BeanbagGateway(
         gateway_id="gateway-1",
         serial_number=None,
@@ -652,10 +652,26 @@ def test_build_controller_normalises_metadata() -> None:
 
     controller = _build_controller(metadata, gateway)
     assert controller.identifier == "gateway-1"
-    assert controller.name == "SecureMTR gateway-1"
+    assert controller.name == "E7+ Water Heater (gateway-1)"
     assert controller.serial_number is None
     assert controller.firmware_version == "2"
     assert controller.model == "E7+"
+
+
+def test_build_controller_ignores_numeric_name() -> None:
+    """Ensure numeric-only metadata names fall back to the default label."""
+
+    metadata = {"BOI": "", "SN": "E0031158", "N": 2, "FV": None, "MD": None}
+    gateway = BeanbagGateway(
+        gateway_id="gateway-1",
+        serial_number=None,
+        host_name="host",
+        capabilities={},
+    )
+
+    controller = _build_controller(metadata, gateway)
+    assert controller.name == "E7+ Water Heater (SN: E0031158)"
+    assert controller.serial_number == "E0031158"
 
 
 def test_entry_display_name_prefers_title() -> None:

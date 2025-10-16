@@ -59,9 +59,8 @@ class SecuremtrPowerSwitch(SwitchEntity):
         self._controller = controller
         serial_identifier = controller.serial_number or controller.identifier
         identifier_slug = _slugify_identifier(serial_identifier)
-        serial_display = serial_identifier or DOMAIN
         self._attr_unique_id = f"{identifier_slug}_primary_power"
-        self._attr_name = f"Secure Meters E7+ {serial_display} Water Heater"
+        self._attr_name = "E7+ Controller"
 
     @property
     def available(self) -> bool:
@@ -77,11 +76,19 @@ class SecuremtrPowerSwitch(SwitchEntity):
 
         controller = self._controller
         serial_identifier = controller.serial_number or controller.identifier
+        serial_display = controller.serial_number
+        if not serial_display:
+            serial_display = serial_identifier
+        device_name = (
+            f"E7+ Water Heater (SN: {serial_display})"
+            if controller.serial_number
+            else f"E7+ Water Heater ({serial_display})"
+        )
         return DeviceInfo(
             identifiers={(DOMAIN, serial_identifier)},
             manufacturer="Secure Meters",
             model=controller.model or "E7+",
-            name="E7+",
+            name=device_name,
             sw_version=controller.firmware_version,
             serial_number=controller.serial_number,
         )

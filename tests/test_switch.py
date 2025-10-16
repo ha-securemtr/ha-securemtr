@@ -66,7 +66,7 @@ def _create_runtime() -> tuple[SecuremtrRuntimeData, DummyBackend]:
     runtime.websocket = SimpleNamespace()
     runtime.controller = SecuremtrController(
         identifier="controller-1",
-        name="E7+ Controller",
+        name="E7+ Water Heater (SN: serial-1)",
         gateway_id="gateway-1",
         serial_number="serial-1",
         firmware_version="1.0.0",
@@ -96,12 +96,12 @@ async def test_switch_setup_creates_entity() -> None:
     assert switch.available
     assert switch.unique_id == "serial_1_primary_power"
     assert switch.device_info["identifiers"] == {(DOMAIN, "serial-1")}
-    assert switch.device_info["name"] == "E7+"
-    assert switch.device_info["model"] == "E7+"
     assert (
-        switch.name
-        == "Secure Meters E7+ serial-1 Water Heater"
+        switch.device_info["name"]
+        == "E7+ Water Heater (SN: serial-1)"
     )
+    assert switch.device_info["model"] == "E7+"
+    assert switch.name == "E7+ Controller"
     assert switch.is_on is False
 
     switch.hass = SimpleNamespace()
@@ -127,6 +127,25 @@ async def test_switch_setup_creates_entity() -> None:
     assert runtime.primary_power_on is False
     assert switch.is_on is False
     assert state_writes == []
+
+
+def test_switch_device_info_without_serial() -> None:
+    """Ensure device registry names fall back to the identifier when no serial exists."""
+
+    runtime, _backend = _create_runtime()
+    controller = SecuremtrController(
+        identifier="controller-1",
+        name="E7+ Water Heater (controller-1)",
+        gateway_id="gateway-1",
+        serial_number=None,
+        firmware_version=None,
+        model=None,
+    )
+
+    switch = SecuremtrPowerSwitch(runtime, controller)
+    device_info = switch.device_info
+    assert device_info["name"] == "E7+ Water Heater (controller-1)"
+    assert device_info["serial_number"] is None
 
 
 @pytest.mark.asyncio
