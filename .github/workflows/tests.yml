@@ -1,0 +1,72 @@
+name: Tests
+
+permissions:
+  contents: write
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  tests:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v7
+        with:
+          enable-cache: true
+
+      - name: Install Python requirement
+        run: uv python install 3.13.2
+
+      - name: Create virtual environment
+        run: uv venv
+
+      - name: Install project dependencies
+        run: uv pip install -e .[test]
+
+      - name: Run tests
+        run: |
+          set -o pipefail
+          uv run pytest --cov=custom_components.securemtr --cov-report=term-missing | tee coverage-report.txt
+
+      - name: Enforce coverage threshold
+        run: uv run coverage report --fail-under=90
+
+      - name: Generate coverage XML
+        run: uv run coverage xml
+
+      - name: Prepare badge directory
+        run: mkdir -p docs/badges
+
+      - name: Generate coverage badge
+        uses: tj-actions/coverage-badge-py@v2
+        with:
+          output: docs/badges/coverage.svg
+
+      - name: Commit updated coverage badge
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add docs/badges/coverage.svg
+          if ! git diff --cached --quiet; then
+            git commit -m "docs: update coverage badge"
+            git push origin HEAD:main
+          fi
+
+      - name: Upload coverage artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-artifacts
+          path: |
+            coverage-report.txt
+            coverage.xml
+            docs/badges/coverage.svg

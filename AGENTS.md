@@ -31,7 +31,7 @@ End users are non-technical Home Assistant operators. Documentation must be task
 * Format and lint all changes with `ruff` before committing.
 
 ## Testing Requirements
-* Execute `timeout 30s pytest --cov=custom_components.termoweb --cov-report=term-missing`.
+* Execute `timeout 30s pytest --cov=custom_components.securemtr --cov-report=term-missing`.
 * Capture partial logs whenever the timed run aborts; treat timeouts as failures requiring investigation. 
 * During debugging, run targeted, no-coverage subsets.
 * If tests approach the 30-second limit, suspect an asynchronous wait issue and stop the run rather than letting it hang.
