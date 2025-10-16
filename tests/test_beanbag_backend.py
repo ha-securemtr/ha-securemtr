@@ -22,6 +22,7 @@ from custom_components.securemtr.beanbag import (
     BeanbagSession,
     BeanbagWebSocketClient,
     BeanbagWebSocketError,
+    DailyProgram,
 )
 
 
@@ -46,6 +47,27 @@ class DummyResponse:
         """Exit the async context manager."""
 
         return None
+
+
+def test_daily_program_coerce_triplet_length_error() -> None:
+    """Validate that triplets must include exactly three entries."""
+
+    with pytest.raises(ValueError):
+        DailyProgram._coerce_triplet((30, 60), "on")
+
+
+def test_daily_program_coerce_triplet_type_error() -> None:
+    """Require minute values to be integers when present."""
+
+    with pytest.raises(TypeError):
+        DailyProgram._coerce_triplet((30, "60", None), "on")
+
+
+def test_daily_program_coerce_triplet_range_error() -> None:
+    """Reject minute values outside the 24-hour window."""
+
+    with pytest.raises(ValueError):
+        DailyProgram._coerce_triplet((1500, None, None), "on")
 
 
 @pytest.mark.asyncio
@@ -778,6 +800,298 @@ async def test_backend_turn_controller_mode_write_error(
 
 
 @pytest.mark.asyncio
+async def test_backend_read_weekly_program_parses_payload(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Parse the flattened weekly program into structured day slots."""
+
+    backend = BeanbagBackend(Mock())
+
+    def build_day(events: list[tuple[int, int]]) -> list[dict[str, int]]:
+        day = [{"O": minute, "T": state} for minute, state in events]
+        while len(day) < 6:
+            day.append({"O": 65535, "T": 255})
+        return day
+
+    transitions: list[dict[str, int]] = []
+    transitions.extend(build_day([(60, 1), (120, 0)]))  # Monday
+    transitions.extend(build_day([]))  # Tuesday
+    transitions.extend(build_day([(300, 1), (360, 0), (540, 1), (600, 0)]))
+    transitions.extend(build_day([]))  # Thursday
+    transitions.extend(build_day([]))  # Friday
+    transitions.extend(build_day([]))  # Saturday
+    transitions.extend(build_day([(720, 0)]))  # Sunday off marker only
+
+    send = AsyncMock(return_value=["unexpected", {"I": 1, "D": transitions}])
+    monkeypatch.setattr(backend, "_send_request", send)
+
+    session_data = BeanbagSession(
+        user_id=1,
+        session_id="abc",
+        token="jwt",
+        token_timestamp=None,
+        gateways=(),
+    )
+
+    program = await backend.read_weekly_program(
+        session_data,
+        Mock(),
+        "gateway-1",
+        zone="primary",
+    )
+
+    assert program[0].on_minutes == (60, None, None)
+    assert program[0].off_minutes == (120, None, None)
+    assert program[1].on_minutes == (None, None, None)
+    assert program[2].on_minutes == (300, 540, None)
+    assert program[2].off_minutes == (360, 600, None)
+    assert program[6].on_minutes == (None, None, None)
+    assert program[6].off_minutes == (720, None, None)
+
+    assert send.await_args.kwargs == {
+        "header_hi": 22,
+        "header_si": 17,
+        "args": [1],
+    }
+
+
+@pytest.mark.asyncio
+async def test_backend_read_weekly_program_invalid_payload(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Raise when the weekly program payload structure is unexpected."""
+
+    backend = BeanbagBackend(Mock())
+    send = AsyncMock(return_value=[{"I": 1, "D": "not-a-list"}])
+    monkeypatch.setattr(backend, "_send_request", send)
+
+    session_data = BeanbagSession(
+        user_id=1,
+        session_id="abc",
+        token="jwt",
+        token_timestamp=None,
+        gateways=(),
+    )
+
+    with pytest.raises(BeanbagWebSocketError):
+        await backend.read_weekly_program(
+            session_data,
+            Mock(),
+            "gateway-1",
+            zone="primary",
+        )
+
+
+@pytest.mark.asyncio
+async def test_backend_read_weekly_program_pads_short_payload(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Pad missing transition slots with sentinel entries."""
+
+    backend = BeanbagBackend(Mock())
+    transitions = [{"O": 45, "T": 1}, None]
+    send = AsyncMock(return_value=[{"I": 1, "D": transitions}])
+    monkeypatch.setattr(backend, "_send_request", send)
+
+    session_data = BeanbagSession(
+        user_id=1,
+        session_id="abc",
+        token="jwt",
+        token_timestamp=None,
+        gateways=(),
+    )
+
+    program = await backend.read_weekly_program(
+        session_data,
+        Mock(),
+        "gateway-1",
+        zone="primary",
+    )
+
+    assert program[0].on_minutes == (45, None, None)
+    assert program[1].on_minutes == (None, None, None)
+
+
+@pytest.mark.asyncio
+async def test_backend_read_weekly_program_truncates_long_payload(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Discard excess transition entries beyond the weekly capacity."""
+
+    backend = BeanbagBackend(Mock())
+    transitions = [
+        {"O": (i * 5) % 1440, "T": 1 if i % 2 == 0 else 0} for i in range(50)
+    ]
+    transitions.insert(0, "noise")
+    send = AsyncMock(return_value=[{"I": 2, "D": transitions}])
+    monkeypatch.setattr(backend, "_send_request", send)
+
+    session_data = BeanbagSession(
+        user_id=1,
+        session_id="abc",
+        token="jwt",
+        token_timestamp=None,
+        gateways=(),
+    )
+
+    program = await backend.read_weekly_program(
+        session_data,
+        Mock(),
+        "gateway-1",
+        zone="boost",
+    )
+
+    total_slots = sum(
+        len([minute for minute in day.on_minutes if minute is not None])
+        + len([minute for minute in day.off_minutes if minute is not None])
+        for day in program
+    )
+    assert total_slots <= 42
+
+
+@pytest.mark.asyncio
+async def test_backend_read_weekly_program_missing_schedule() -> None:
+    """Raise when the weekly program payload omits the schedule block."""
+
+    backend = BeanbagBackend(Mock())
+    backend._send_request = AsyncMock(return_value=[])  # type: ignore[attr-defined]
+    session_data = BeanbagSession(
+        user_id=1,
+        session_id="abc",
+        token="jwt",
+        token_timestamp=None,
+        gateways=(),
+    )
+
+    with pytest.raises(BeanbagWebSocketError):
+        await backend.read_weekly_program(
+            session_data,
+            Mock(),
+            "gateway-1",
+            zone="primary",
+        )
+
+
+@pytest.mark.asyncio
+async def test_backend_read_weekly_program_rejects_zone() -> None:
+    """Reject unsupported zone selectors."""
+
+    backend = BeanbagBackend(Mock())
+    session_data = BeanbagSession(
+        user_id=1,
+        session_id="abc",
+        token="jwt",
+        token_timestamp=None,
+        gateways=(),
+    )
+
+    with pytest.raises(ValueError):
+        await backend.read_weekly_program(
+            session_data,
+            Mock(),
+            "gateway-1",
+            zone="invalid",  # type: ignore[arg-type]
+        )
+
+
+@pytest.mark.asyncio
+async def test_backend_write_weekly_program_transmits_payload(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Ensure the payload flattens each day into 6 transition slots."""
+
+    backend = BeanbagBackend(Mock())
+    send = AsyncMock(return_value=0)
+    monkeypatch.setattr(backend, "_send_request", send)
+
+    session_data = BeanbagSession(
+        user_id=1,
+        session_id="abc",
+        token="jwt",
+        token_timestamp=None,
+        gateways=(),
+    )
+
+    empty_day = DailyProgram((None, None, None), (None, None, None))
+    program = (
+        DailyProgram((60, None, None), (120, None, None)),
+        empty_day,
+        DailyProgram((300, 540, None), (360, 600, None)),
+        empty_day,
+        empty_day,
+        empty_day,
+        DailyProgram((None, None, None), (720, None, None)),
+    )
+
+    await backend.write_weekly_program(
+        session_data,
+        Mock(),
+        "gateway-1",
+        program,
+        zone="primary",
+    )
+
+    assert send.await_args.kwargs["header_hi"] == 21
+    assert send.await_args.kwargs["header_si"] == 17
+
+    payload = send.await_args.kwargs["args"]
+    assert isinstance(payload, list)
+    assert payload and payload[0]["I"] == 1
+    transitions = payload[0]["D"]
+    assert len(transitions) == 42
+    assert transitions[0] == {"O": 60, "T": 1}
+    assert transitions[1] == {"O": 120, "T": 0}
+    assert transitions[2] == {"O": 65535, "T": 255}
+    third_day_start = 2 * 6
+    assert transitions[third_day_start] == {"O": 300, "T": 1}
+    assert transitions[third_day_start + 1] == {"O": 360, "T": 0}
+    assert transitions[third_day_start + 2] == {"O": 540, "T": 1}
+    assert transitions[third_day_start + 3] == {"O": 600, "T": 0}
+    sunday_start = 6 * 6
+    assert transitions[sunday_start] == {"O": 720, "T": 0}
+    for offset in range(1, 6):
+        assert transitions[sunday_start + offset] == {"O": 65535, "T": 255}
+
+
+@pytest.mark.asyncio
+async def test_backend_write_weekly_program_ack_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Raise when the program write acknowledgement is unexpected."""
+
+    backend = BeanbagBackend(Mock())
+    send = AsyncMock(return_value=5)
+    monkeypatch.setattr(backend, "_send_request", send)
+
+    session_data = BeanbagSession(
+        user_id=1,
+        session_id="abc",
+        token="jwt",
+        token_timestamp=None,
+        gateways=(),
+    )
+
+    empty_day = DailyProgram((None, None, None), (None, None, None))
+    program = (
+        empty_day,
+        empty_day,
+        empty_day,
+        empty_day,
+        empty_day,
+        empty_day,
+        empty_day,
+    )
+
+    with pytest.raises(BeanbagWebSocketError):
+        await backend.write_weekly_program(
+            session_data,
+            Mock(),
+            "gateway-1",
+            program,
+            zone="primary",
+        )
+
+@pytest.mark.asyncio
 async def test_backend_send_request_handles_informational_frames(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -868,3 +1182,145 @@ async def test_backend_send_request_with_args(monkeypatch: pytest.MonkeyPatch) -
 
     assert result == 0
     assert websocket.sent[0]["P"][1] == [1, {"I": 6, "V": 2}]
+
+def test_backend_parse_daily_program_invalid_structure() -> None:
+    """Raise when daily entries lack integer minute fields."""
+
+    with pytest.raises(BeanbagWebSocketError):
+        BeanbagBackend._parse_daily_program([{ "O": "bad", "T": 1 }])
+
+
+def test_backend_parse_daily_program_minute_bounds() -> None:
+    """Raise when daily entries specify out-of-range minutes."""
+
+    with pytest.raises(BeanbagWebSocketError):
+        BeanbagBackend._parse_daily_program([{ "O": 2000, "T": 1 }])
+
+
+def test_backend_parse_daily_program_excess_on_transitions() -> None:
+    """Raise when more than three on transitions are reported."""
+
+    entries = [{"O": minute, "T": 1} for minute in (30, 60, 90, 120)]
+    with pytest.raises(BeanbagWebSocketError):
+        BeanbagBackend._parse_daily_program(entries)
+
+
+def test_backend_parse_daily_program_excess_off_transitions() -> None:
+    """Raise when more than three off transitions are reported."""
+
+    entries = [{"O": minute, "T": 0} for minute in (30, 60, 90, 120)]
+    with pytest.raises(BeanbagWebSocketError):
+        BeanbagBackend._parse_daily_program(entries)
+
+
+def test_backend_parse_daily_program_unknown_state() -> None:
+    """Raise when an unsupported transition type is observed."""
+
+    with pytest.raises(BeanbagWebSocketError):
+        BeanbagBackend._parse_daily_program([{ "O": 45, "T": 3 }])
+
+
+def test_backend_parse_daily_program_ignores_noise() -> None:
+    """Skip over non-dictionary entries while parsing."""
+
+    result = BeanbagBackend._parse_daily_program(["noise", {"O": 45, "T": 1}])
+    assert result.on_minutes[0] == 45
+
+def test_backend_build_weekly_program_payload_requires_seven_days() -> None:
+    """Ensure weekly program encoding enforces the seven-day structure."""
+
+    empty_day = DailyProgram((None, None, None), (None, None, None))
+    with pytest.raises(ValueError):
+        BeanbagBackend._build_weekly_program_payload((empty_day,) * 6, 1)
+
+
+def test_backend_build_weekly_program_payload_validates_counts() -> None:
+    """Reject daily schedules that exceed documented transition limits."""
+
+    class FakeDay:
+        def __init__(self, on_minutes: tuple[int | None, ...], off_minutes: tuple[int | None, ...]) -> None:
+            self.on_minutes = on_minutes
+            self.off_minutes = off_minutes
+
+    valid = DailyProgram((None, None, None), (None, None, None))
+    program = (
+        FakeDay((0, 60, 120, 180), (None, None, None)),
+        valid,
+        valid,
+        valid,
+        valid,
+        valid,
+        valid,
+    )
+
+    with pytest.raises(ValueError):
+        BeanbagBackend._build_weekly_program_payload(program, 1)
+
+    program_bad_minute = (
+        FakeDay((1500, None, None), (None, None, None)),
+        valid,
+        valid,
+        valid,
+        valid,
+        valid,
+        valid,
+    )
+
+    with pytest.raises(ValueError):
+        BeanbagBackend._build_weekly_program_payload(program_bad_minute, 1)
+
+@pytest.mark.asyncio
+async def test_backend_write_weekly_program_boost_zone(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Verify the boost zone maps to index 2 during writes."""
+
+    backend = BeanbagBackend(Mock())
+    send = AsyncMock(return_value=0)
+    monkeypatch.setattr(backend, "_send_request", send)
+
+    session_data = BeanbagSession(
+        user_id=1,
+        session_id="abc",
+        token="jwt",
+        token_timestamp=None,
+        gateways=(),
+    )
+
+    empty_day = DailyProgram((None, None, None), (None, None, None))
+    await backend.write_weekly_program(
+        session_data,
+        Mock(),
+        "gateway-1",
+        (empty_day,) * 7,
+        zone="boost",
+    )
+
+    args = send.await_args.kwargs["args"]
+    assert args[0]["I"] == 2
+
+@pytest.mark.asyncio
+async def test_backend_read_weekly_program_payload_not_list(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Raise when the WebSocket payload is not a list."""
+
+    backend = BeanbagBackend(Mock())
+    send = AsyncMock(return_value={"invalid": True})
+    monkeypatch.setattr(backend, "_send_request", send)
+
+    session_data = BeanbagSession(
+        user_id=1,
+        session_id="abc",
+        token="jwt",
+        token_timestamp=None,
+        gateways=(),
+    )
+
+    with pytest.raises(BeanbagWebSocketError):
+        await backend.read_weekly_program(
+            session_data,
+            Mock(),
+            "gateway-1",
+            zone="primary",
+        )

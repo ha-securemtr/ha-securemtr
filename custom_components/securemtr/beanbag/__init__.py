@@ -2,12 +2,12 @@
 
 from __future__ import annotations
 
-from collections.abc import Iterable
+from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
 import logging
 import secrets
 import time
-from typing import Any
+from typing import Any, Literal
 
 from aiohttp import (
     ClientError,
@@ -30,6 +30,11 @@ LOGIN_PATH = "/api/UserRestAPI/LoginRequest"
 WS_PATH = "/api/TransactionRestAPI/ConnectWebSocket"
 REQUEST_ID = "1"
 SUBPROTOCOL = "BB-BO-01"
+
+MINUTES_PER_DAY = 24 * 60
+TRANSITIONS_PER_DAY = 6
+SENTINEL_MINUTE = 65535
+SENTINEL_TYPE = 255
 
 
 class BeanbagError(RuntimeError):
@@ -71,6 +76,60 @@ class BeanbagStateSnapshot:
 
     payload: dict[str, Any]
     primary_power_on: bool | None
+
+
+type ProgramZone = Literal["primary", "boost"]
+
+
+@dataclass(slots=True)
+class DailyProgram:
+    """Store up to three on/off transitions for a single day."""
+
+    on_minutes: tuple[int | None, int | None, int | None]
+    off_minutes: tuple[int | None, int | None, int | None]
+
+    def __post_init__(self) -> None:
+        """Validate and normalise minute triplets."""
+
+        self.on_minutes = self._coerce_triplet(self.on_minutes, "on")
+        self.off_minutes = self._coerce_triplet(self.off_minutes, "off")
+
+    @staticmethod
+    def _coerce_triplet(
+        values: Sequence[int | None], label: str
+    ) -> tuple[int | None, int | None, int | None]:
+        """Normalise a 3-slot minute collection."""
+
+        if len(values) != 3:
+            raise ValueError(f"{label} minute triplet must contain exactly 3 entries")
+
+        normalised: list[int | None] = []
+        for position, minute in enumerate(values):
+            if minute is None:
+                normalised.append(None)
+                continue
+            if not isinstance(minute, int):
+                raise TypeError(
+                    f"{label} minute {position + 1} must be an integer or None"
+                )
+            if minute < 0 or minute >= MINUTES_PER_DAY:
+                raise ValueError(
+                    f"{label} minute {position + 1} must be between 0 and 1439 minutes"
+                )
+            normalised.append(minute)
+
+        return (normalised[0], normalised[1], normalised[2])
+
+
+type WeeklyProgram = tuple[
+    DailyProgram,
+    DailyProgram,
+    DailyProgram,
+    DailyProgram,
+    DailyProgram,
+    DailyProgram,
+    DailyProgram,
+]
 
 
 class BeanbagHttpClient:
@@ -528,6 +587,61 @@ class BeanbagBackend:
 
         await self._set_primary_mode(session, websocket, gateway_id, value=0)
 
+    async def read_weekly_program(
+        self,
+        session: BeanbagSession,
+        websocket: ClientWebSocketResponse,
+        gateway_id: str,
+        *,
+        zone: ProgramZone,
+    ) -> WeeklyProgram:
+        """Return the parsed weekly program for the selected zone."""
+
+        index = self._resolve_program_index(zone)
+        response = await self._send_request(
+            session,
+            websocket,
+            gateway_id,
+            header_hi=22,
+            header_si=17,
+            args=[index],
+        )
+
+        program = self._parse_weekly_program(response)
+        _LOGGER.debug(
+            "Beanbag weekly program retrieved for zone %s", zone,
+        )
+        return program
+
+    async def write_weekly_program(
+        self,
+        session: BeanbagSession,
+        websocket: ClientWebSocketResponse,
+        gateway_id: str,
+        program: WeeklyProgram,
+        *,
+        zone: ProgramZone,
+    ) -> None:
+        """Send the weekly program update for the selected zone."""
+
+        index = self._resolve_program_index(zone)
+        payload = self._build_weekly_program_payload(program, index)
+        acknowledgement = await self._send_request(
+            session,
+            websocket,
+            gateway_id,
+            header_hi=21,
+            header_si=17,
+            args=payload,
+        )
+
+        if acknowledgement not in (0, "0", None):
+            raise BeanbagWebSocketError(
+                f"Unexpected Beanbag program write acknowledgement: {acknowledgement}"
+            )
+
+        _LOGGER.debug("Beanbag weekly program written for zone %s", zone)
+
     async def _set_primary_mode(
         self,
         session: BeanbagSession,
@@ -583,6 +697,190 @@ class BeanbagBackend:
                     return False
 
         return None
+
+    @staticmethod
+    def _resolve_program_index(zone: ProgramZone) -> int:
+        """Translate the textual zone selector into the Beanbag index."""
+
+        zone_key = zone.lower()
+
+        if zone_key == "primary":
+            return 1
+        if zone_key == "boost":
+            return 2
+        raise ValueError(f"Unsupported program zone: {zone}")
+
+    @staticmethod
+    def _parse_weekly_program(payload: Any) -> WeeklyProgram:
+        """Convert the Beanbag wire format into a weekly program structure."""
+
+        if not isinstance(payload, list):
+            raise BeanbagWebSocketError(
+                "Beanbag weekly program payload did not contain a list"
+            )
+        for entry in payload:
+            if not isinstance(entry, dict):
+                _LOGGER.debug(
+                    "Ignoring non-object weekly program entry of type %s",
+                    type(entry).__name__,
+                )
+                continue
+
+            transitions = entry.get("D")
+            if not isinstance(transitions, list):
+                raise BeanbagWebSocketError(
+                    "Beanbag weekly program entry missing transition list"
+                )
+
+            return BeanbagBackend._parse_flat_program(transitions)
+
+        raise BeanbagWebSocketError(
+            "Beanbag weekly program payload missing schedule block"
+        )
+
+    @staticmethod
+    def _parse_flat_program(transitions: list[Any]) -> WeeklyProgram:
+        """Interpret a flattened seven-day transition list."""
+
+        filtered: list[dict[str, Any]] = []
+        for entry in transitions:
+            if isinstance(entry, dict):
+                filtered.append(entry)
+            else:
+                _LOGGER.debug(
+                    "Ignoring non-object weekly transition entry of type %s",
+                    type(entry).__name__,
+                )
+
+        total_slots = 7 * TRANSITIONS_PER_DAY
+        if len(filtered) < total_slots:
+            padding = total_slots - len(filtered)
+            filtered.extend(
+                {"O": SENTINEL_MINUTE, "T": SENTINEL_TYPE} for _ in range(padding)
+            )
+        elif len(filtered) > total_slots:
+            _LOGGER.debug(
+                "Truncating weekly program entries from %s to %s",
+                len(filtered),
+                total_slots,
+            )
+            filtered = filtered[:total_slots]
+
+        days: list[DailyProgram] = []
+        for day_index in range(7):
+            start = day_index * TRANSITIONS_PER_DAY
+            day_entries = filtered[start : start + TRANSITIONS_PER_DAY]
+            days.append(BeanbagBackend._parse_daily_program(day_entries))
+
+        return (
+            days[0],
+            days[1],
+            days[2],
+            days[3],
+            days[4],
+            days[5],
+            days[6],
+        )
+
+    @staticmethod
+    def _parse_daily_program(entries: list[Any]) -> DailyProgram:
+        """Derive a DailyProgram object from transition entries."""
+
+        on_minutes: list[int] = []
+        off_minutes: list[int] = []
+
+        for entry in entries:
+            if not isinstance(entry, dict):
+                _LOGGER.debug(
+                    "Ignoring non-object transition entry of type %s",
+                    type(entry).__name__,
+                )
+                continue
+
+            minute = entry.get("O")
+            state = entry.get("T")
+
+            if minute == SENTINEL_MINUTE and state == SENTINEL_TYPE:
+                continue
+
+            if not isinstance(minute, int) or not isinstance(state, int):
+                raise BeanbagWebSocketError(
+                    "Beanbag weekly program transition had invalid structure"
+                )
+
+            if minute < 0 or minute >= MINUTES_PER_DAY:
+                raise BeanbagWebSocketError(
+                    f"Beanbag weekly program minute out of range: {minute}"
+                )
+
+            if state == 1:
+                if len(on_minutes) >= 3:
+                    raise BeanbagWebSocketError(
+                        "Beanbag weekly program reported more than 3 on transitions"
+                    )
+                on_minutes.append(minute)
+            elif state == 0:
+                if len(off_minutes) >= 3:
+                    raise BeanbagWebSocketError(
+                        "Beanbag weekly program reported more than 3 off transitions"
+                    )
+                off_minutes.append(minute)
+            else:
+                raise BeanbagWebSocketError(
+                    f"Beanbag weekly program reported unknown transition type: {state}"
+                )
+
+        on_minutes.sort()
+        off_minutes.sort()
+
+        padded_on = tuple(on_minutes + [None] * (3 - len(on_minutes)))
+        padded_off = tuple(off_minutes + [None] * (3 - len(off_minutes)))
+
+        return DailyProgram(
+            (padded_on[0], padded_on[1], padded_on[2]),
+            (padded_off[0], padded_off[1], padded_off[2]),
+        )
+
+    @staticmethod
+    def _build_weekly_program_payload(
+        program: WeeklyProgram, index: int
+    ) -> list[dict[str, Any]]:
+        """Translate a WeeklyProgram into the Beanbag wire structure."""
+
+        if len(program) != 7:
+            raise ValueError("Weekly program must contain exactly 7 days")
+
+        flattened: list[dict[str, int]] = []
+
+        for day in program:
+            on_minutes = [minute for minute in day.on_minutes if minute is not None]
+            off_minutes = [minute for minute in day.off_minutes if minute is not None]
+
+            if len(on_minutes) > 3 or len(off_minutes) > 3:
+                raise ValueError("Each day may only define up to three transitions")
+
+            transitions = [
+                (minute, 1) for minute in on_minutes if isinstance(minute, int)
+            ] + [
+                (minute, 0) for minute in off_minutes if isinstance(minute, int)
+            ]
+
+            for minute, _ in transitions:
+                if minute < 0 or minute >= MINUTES_PER_DAY:
+                    raise ValueError("Program minutes must be between 0 and 1439")
+
+            transitions.sort(key=lambda item: (item[0], 0 if item[1] == 1 else 1))
+
+            transitions_payload = [
+                {"O": minute, "T": state} for minute, state in transitions
+            ]
+
+            while len(transitions_payload) < TRANSITIONS_PER_DAY:
+                transitions_payload.append({"O": SENTINEL_MINUTE, "T": SENTINEL_TYPE})
+
+            flattened.extend(transitions_payload)
+
+        return [{"I": index, "D": flattened}]
 
     async def _send_request(
         self,
@@ -661,4 +959,7 @@ __all__ = [
     "BeanbagStateSnapshot",
     "BeanbagWebSocketClient",
     "BeanbagWebSocketError",
+    "DailyProgram",
+    "ProgramZone",
+    "WeeklyProgram",
 ]
