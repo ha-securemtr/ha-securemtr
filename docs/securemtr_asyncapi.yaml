@@ -1,38 +1,30 @@
 asyncapi: 2.6.0
 info:
-  title: Secure Controls / Beanbag WebSocket API (Confirmed Subset)
-  version: "0.4.0"
-  description: >
-    Confirmed WebSocket channel and message shapes observed from live traffic.
-    Water heater with two immersion circuits:
-      • slot 1 → primary immersion (block SI:33), on/off via mode write
-      • slot 2 → boost immersion (block SI:16), timed boost & toggle
+  title: Secure Controls (Beanbag Cloud) — WebSocket API (Confirmed Subset)
+  version: "1.2.0"
+  description: |
+    Confirmed WebSocket channel, envelopes, and messages observed from the Secure Controls app.
+    Two immersion circuits: **slot 1** (primary, state block **SI:33**) and **slot 2** (boost, block **SI:16**).
+    Weekly schedule arrays are **Monday → Sunday**. All message examples below are **realistic** based on captures.
+
 servers:
   production:
     url: wss://app.beanbag.online
     protocol: wss
-    description: Beanbag cloud WebSocket endpoint (confirmed)
+    description: Confirmed WebSocket origin
     bindings:
       ws:
         headers:
           type: object
           required: [ Authorization, Session-id, Request-id ]
           properties:
-            Authorization:
-              type: string
-              description: Bearer {token} from REST login
-              examples: ["Bearer {token}"]
-            Session-id:
-              type: string
-              description: {sessionId} from REST login
-              examples: ["{sessionId}"]
-            Request-id:
-              type: string
-              description: Observed constant "1"
-              examples: ["1"]
+            Authorization: { type: string, example: "Bearer {token}" }
+            Session-id:   { type: string, example: "{sessionId}" }
+            Request-id:   { type: string, example: "1" }
+
 channels:
   api/TransactionRestAPI/ConnectWebSocket:
-    description: Confirmed single WS channel; subprotocol must be BB-BO-01
+    description: Confirmed WS channel; subprotocol **BB-BO-01** is required in the handshake.
     bindings:
       ws:
         protocol: BB-BO-01
@@ -47,263 +39,343 @@ channels:
           - $ref: '#/components/messages/ConfigRead'
           - $ref: '#/components/messages/StateRead'
           - $ref: '#/components/messages/EnergyHistoryRead'
-          - $ref: '#/components/messages/ProgramRead'
-          - $ref: '#/components/messages/ProgramWrite'
+          - $ref: '#/components/messages/ProgramReadPrimary'
+          - $ref: '#/components/messages/ProgramReadBoost'
+          - $ref: '#/components/messages/ProgramWritePrimary'
+          - $ref: '#/components/messages/ProgramWriteBoost'
           - $ref: '#/components/messages/ModeWritePrimary'
           - $ref: '#/components/messages/BoostStart'
           - $ref: '#/components/messages/BoostStop'
           - $ref: '#/components/messages/BoostToggleTimed'
     subscribe:
-      summary: Server → Client (responses and notifications)
+      summary: Server → Client (responses / push)
       message:
         oneOf:
           - $ref: '#/components/messages/ServerResponse'
-          - $ref: '#/components/messages/ServerNotify'
+          - $ref: '#/components/messages/ServerNotify']
+
 components:
   messageTraits:
     correlationTrait:
       correlationId:
         description: Correlates replies with requests; server echoes this value.
         location: "$message.payload#/I"
+
   schemas:
-    EnvelopeBase:
+    ClientRequest:
       type: object
-      required: [ V, DTS, I ]
+      required: [ V, DTS, I, M, P ]
       properties:
         V:   { type: string, const: "1.0" }
-        DTS: { type: integer, description: Epoch seconds }
-        I:   { type: string, description: "{sessionId}-{signed_32bit_random}" }
-    ClientRequest:
-      allOf:
-        - $ref: '#/components/schemas/EnvelopeBase'
-        - type: object
-          required: [ M, P ]
-          properties:
-            M: { type: string, const: "Request" }
-            P:
-              type: array
-              description: >
-                Positional args; first element is header {"GMI","HI","SI"}.
-                Second element (optional) is an arguments array for the specific op.
-              items: {}
+        DTS: { type: integer, description: "Epoch seconds" }
+        I:   { type: string, description: "{sessionId}-{rand32}" }
+        M:   { type: string, const: "Request" }
+        P:
+          type: array
+          description: >
+            Position 0: Header `{GMI,HI,SI}`. Position 1 (optional): arguments array.
+          items: {}
+
     ServerResponseSchema:
-      allOf:
-        - $ref: '#/components/schemas/EnvelopeBase'
-        - type: object
-          required: [ R ]
-          properties:
-            R: {}
+      type: object
+      required: [ V, DTS, I, R ]
+      properties:
+        V: { type: string, const: "1.0" }
+        DTS: { type: integer }
+        I: { type: string }
+        R: { }
+
     ServerNotifySchema:
-      allOf:
-        - $ref: '#/components/schemas/EnvelopeBase'
-        - type: object
-          required: [ M, P ]
-          properties:
-            M: { type: string, const: "Notify" }
-            P:
-              type: array
-              description: '[ { "GMI": "...", "SI": <block>, "HI": 4 }, [ <slot>, { "I": <itemId>, "V": <value>, "OT": <opType>, "D": <aux> } ] ]'
-              items: {}
+      type: object
+      required: [ V, DTS, M, P ]
+      properties:
+        V: { type: string, const: "1.0" }
+        DTS: { type: integer }
+        M: { type: string, const: "Notify" }
+        P:
+          type: array
+          description: '[ { "GMI": "...", "SI": <block>, "HI": 4 }, [ <slot>, { "I": <item>, "V": <value>, "OT": <op>, "D": <aux> } ] ]'
+
   messages:
+
     ZonesRead:
       name: zones.read
       title: Zones / topology
       traits: [ { $ref: '#/components/messageTraits/correlationTrait' } ]
-      payload:
-        allOf:
-          - $ref: '#/components/schemas/ClientRequest'
-          - type: object
-            example:
-              V: "1.0"
-              DTS: 1760617091
-              I: "{sessionId}-{rand32}"
-              M: "Request"
-              P: [ { GMI: "{gatewayID}", HI: 49, SI: 11 } ]
+      payload: { $ref: '#/components/schemas/ClientRequest' }
+      examples:
+        request:
+          payload: { V: "1.0", DTS: 1760641455, I: "{sessionId}-{rand32}", M: "Request", P: [ { GMI: "{gatewayID}", HI: 49, SI: 11 } ] }
+        response:
+          payload: { V: "1.0", DTS: 1760641455, I: "{sessionId}-{rand32}", R: [ { ZT: 2, CN: 1, ZN: 1, ZNM: "" }, { ZT: 1, CN: 2, ZN: 2, ZNM: "" } ] }
+
     TimeTick:
       name: time.tick
       title: Keepalive / clock
       traits: [ { $ref: '#/components/messageTraits/correlationTrait' } ]
-      payload:
-        allOf:
-          - $ref: '#/components/schemas/ClientRequest'
-          - type: object
-            example:
-              V: "1.0"
-              DTS: 1760617091
-              I: "{sessionId}-{rand32}"
-              M: "Request"
-              P: [ { GMI: "{gatewayID}", HI: 2, SI: 103 }, [ 1760617091 ] ]
+      payload: { $ref: '#/components/schemas/ClientRequest' }
+      examples:
+        request:
+          payload: { V: "1.0", DTS: 1760641455, I: "{sessionId}-{rand32}", M: "Request", P: [ { GMI: "{gatewayID}", HI: 2, SI: 103 }, [ 1760641455 ] ] }
+        response:
+          payload: { V: "1.0", DTS: 1760641455, I: "{sessionId}-{rand32}", R: 0 }
+
     SchedulesSummary:
       name: schedules.summary
-      title: Schedules overview
+      title: Program overview & last-updated
       traits: [ { $ref: '#/components/messageTraits/correlationTrait' } ]
-      payload:
-        allOf:
-          - $ref: '#/components/schemas/ClientRequest'
-          - type: object
-            example:
-              V: "1.0"
-              DTS: 1760617092
-              I: "{sessionId}-{rand32}"
-              M: "Request"
-              P: [ { GMI: "{gatewayID}", HI: 5, SI: 1 } ]
+      payload: { $ref: '#/components/schemas/ClientRequest' }
+      examples:
+        request:
+          payload: { V: "1.0", DTS: 1760641455, I: "{sessionId}-{rand32}", M: "Request", P: [ { GMI: "{gatewayID}", HI: 5, SI: 1 } ] }
+        response:
+          payload:
+            V: "1.0"
+            DTS: 1760641455
+            I: "{sessionId}-{rand32}"
+            R:
+              V:
+                - I: 1
+                  SI: 16
+                  V:
+                    - { ALI: 11, OR: 0, AB: 0, TS: 1760634906 }
+                    - { ALI: 12, OR: 0, AB: 0, TS: 1760634906 }
+
     MetadataRead:
       name: device.metadata.read
       title: Device metadata
       traits: [ { $ref: '#/components/messageTraits/correlationTrait' } ]
-      payload:
-        allOf:
-          - $ref: '#/components/schemas/ClientRequest'
-          - type: object
-            example:
-              V: "1.0"
-              DTS: 1760617092
-              I: "{sessionId}-{rand32}"
-              M: "Request"
-              P: [ { GMI: "{gatewayID}", HI: 17, SI: 11 } ]
+      payload: { $ref: '#/components/schemas/ClientRequest' }
+      examples:
+        request:
+          payload: { V: "1.0", DTS: 1760641455, I: "{sessionId}-{rand32}", M: "Request", P: [ { GMI: "{gatewayID}", HI: 17, SI: 11 } ] }
+        response:
+          payload:
+            V: "1.0"
+            DTS: 1760641455
+            I: "{sessionId}-{rand32}"
+            R: { BOI: 1, UI: 1, N: "{device_friendly_name}", SN: "{serial_number}", FV: "{firmware_version}", MD: 2, AS: -1, LUT: 1760641455 }
+
     ConfigRead:
       name: device.config.read
       title: Config parameters
       traits: [ { $ref: '#/components/messageTraits/correlationTrait' } ]
-      payload:
-        allOf:
-          - $ref: '#/components/schemas/ClientRequest'
-          - type: object
-            example:
-              V: "1.0"
-              DTS: 1760617092
-              I: "{sessionId}-{rand32}"
-              M: "Request"
-              P: [ { GMI: "{gatewayID}", HI: 14, SI: 11 } ]
+      payload: { $ref: '#/components/schemas/ClientRequest' }
+      examples:
+        request:
+          payload: { V: "1.0", DTS: 1760641455, I: "{sessionId}-{rand32}", M: "Request", P: [ { GMI: "{gatewayID}", HI: 14, SI: 11 } ] }
+        response:
+          payload:
+            V: "1.0"
+            DTS: 1760641455
+            I: "{sessionId}-{rand32}"
+            R:
+              V:
+                - BOI: 1
+                  SI: 16
+                  V:
+                    - { CI: 1, CV: 50 }
+                    - { CI: 2, CV: 300 }
+                    - { CI: 4, CV: 1 }
+
     StateRead:
       name: state.read
       title: Live state (blocks)
       traits: [ { $ref: '#/components/messageTraits/correlationTrait' } ]
-      payload:
-        allOf:
-          - $ref: '#/components/schemas/ClientRequest'
-          - type: object
-            example:
-              V: "1.0"
-              DTS: 1760617092
-              I: "{sessionId}-{rand32}"
-              M: "Request"
-              P: [ { GMI: "{gatewayID}", HI: 3, SI: 1 } ]
+      payload: { $ref: '#/components/schemas/ClientRequest' }
+      examples:
+        request:
+          payload: { V: "1.0", DTS: 1760641455, I: "{sessionId}-{rand32}", M: "Request", P: [ { GMI: "{gatewayID}", HI: 3, SI: 1 } ] }
+        response:
+          payload:
+            V: "1.0"
+            DTS: 1760641455
+            I: "{sessionId}-{rand32}"
+            R:
+              V:
+                - I: 1
+                  SI: 33
+                  V:
+                    - { I: 6, V: 2, OT: 0, D: 0 }
+                    - { I: 28, V: 1, OT: 0, D: 0 }
+                    - { I: 30, V: 0, OT: 0, D: 0 }
+                    - { I: 5, V: 0, OT: 0, D: 0 }
+                    - { I: 9, V: 285, OT: 0, D: 0 }
+                    - { I: 10, V: 1, OT: 0, D: 0 }
+                  S: 0
+                - I: 2
+                  SI: 16
+                  V:
+                    - { I: 4, V: 0, OT: 0, D: 0 }
+                    - { I: 9, V: 480, OT: 0, D: 0 }
+                    - { I: 10, V: 0, OT: 0, D: 0 }
+                    - { I: 27, V: 0, OT: 0, D: 0 }
+                  S: 0
+
     EnergyHistoryRead:
       name: energy.history.read
       title: Energy/consumption history
       traits: [ { $ref: '#/components/messageTraits/correlationTrait' } ]
-      payload:
-        allOf:
-          - $ref: '#/components/schemas/ClientRequest'
-          - type: object
-            example:
-              V: "1.0"
-              DTS: 1760615960
-              I: "{sessionId}-{rand32}"
-              M: "Request"
-              P: [ { GMI: "{gatewayID}", HI: 9, SI: 36 }, [ 1 ] ]
-    ProgramRead:
-      name: program.read
-      title: Program read (by index)
-      traits: [ { $ref: '#/components/messageTraits/correlationTrait' } ]
-      payload:
-        allOf:
-          - $ref: '#/components/schemas/ClientRequest'
-          - type: object
-            example:
-              V: "1.0"
-              DTS: 1760618568
-              I: "{sessionId}-{rand32}"
-              M: "Request"
-              P: [ { GMI: "{gatewayID}", HI: 22, SI: 17 }, [ 2 ] ]  # index 2 = boost program
+      payload: { $ref: '#/components/schemas/ClientRequest' }
       examples:
-        semantics:
-          summary: Program entry
-          description: >
-            Reply payload: [{ "I": 2, "D":[ {"O":<minutesFromMidnight>, "T": 0|1|255}, ... ] }]
-            T codes: 1=Boost ON, 0=Boost OFF, 255=sentinel/unused; O is minutes since midnight.
-    ProgramWrite:
-      name: program.write
-      title: Program write (by index)
+        request:
+          payload: { V: "1.0", DTS: 1760641640, I: "{sessionId}-{rand32}", M: "Request", P: [ { GMI: "{gatewayID}", HI: 9, SI: 36 }, [ 1 ] ] }
+        response:
+          payload:
+            V: "1.0"
+            DTS: 1760641640
+            I: "{sessionId}-{rand32}"
+            R:
+              - I: 0
+                D:
+                  - { T: 1760561617, OP: 1725, BP: 0, OS: 165, OA: 84, BS: 0, BA: 0 }
+                  - { T: 1760485959, OP: 1821, BP: 0, OS: 165, OA: 91, BS: 0, BA: 0 }
+
+    ProgramReadPrimary:
+      name: program.read.primary
+      title: Program read (index 1 — primary)
       traits: [ { $ref: '#/components/messageTraits/correlationTrait' } ]
-      payload:
-        allOf:
-          - $ref: '#/components/schemas/ClientRequest'
-          - type: object
-            example:
-              V: "1.0"
-              DTS: 1760618673
-              I: "{sessionId}-{rand32}"
-              M: "Request"
-              P:
-                - { GMI: "{gatewayID}", HI: 21, SI: 17 }
-                - [ { I: 2, D: [ { O: 105, T: 1 }, { O: 525, T: 0 } ] } ]  # Sunday: on 01:45, off 08:45
+      payload: { $ref: '#/components/schemas/ClientRequest' }
+      examples:
+        request:
+          payload: { V: "1.0", DTS: 1760639902, I: "{sessionId}-{rand32}", M: "Request", P: [ { GMI: "{gatewayID}", HI: 22, SI: 17 }, [ 1 ] ] }
+        response:
+          payload:
+            V: "1.0"
+            DTS: 1760639902
+            I: "{sessionId}-{rand32}"
+            R:
+              - I: 1
+                D:
+                  - { O: 285, T: 1 }   # 04:45 ON
+                  - { O: 465, T: 0 }   # 07:45 OFF
+                  - { O: 65535, T: 255 }
+
+    ProgramReadBoost:
+      name: program.read.boost
+      title: Program read (index 2 — boost)
+      traits: [ { $ref: '#/components/messageTraits/correlationTrait' } ]
+      payload: { $ref: '#/components/schemas/ClientRequest' }
+      examples:
+        request:
+          payload: { V: "1.0", DTS: 1760618568, I: "{sessionId}-{rand32}", M: "Request", P: [ { GMI: "{gatewayID}", HI: 22, SI: 17 }, [ 2 ] ] }
+        response:
+          payload:
+            V: "1.0"
+            DTS: 1760618568
+            I: "{sessionId}-{rand32}"
+            R:
+              - I: 2
+                D:
+                  - { O: 105, T: 1 }   # 01:45 ON
+                  - { O: 525, T: 0 }   # 08:45 OFF
+                  - { O: 65535, T: 255 }
+
+    ProgramWritePrimary:
+      name: program.write.primary
+      title: Program write (index 1 — primary)
+      traits: [ { $ref: '#/components/messageTraits/correlationTrait' } ]
+      payload: { $ref: '#/components/schemas/ClientRequest' }
+      examples:
+        request:
+          payload:
+            V: "1.0"
+            DTS: 1760640003
+            I: "{sessionId}-{rand32}"
+            M: "Request"
+            P:
+              - { GMI: "{gatewayID}", HI: 21, SI: 17 }
+              - [ { I: 1, D: [ { O: 285, T: 1 }, { O: 465, T: 0 }, { O: 1185, T: 1 }, { O: 1215, T: 0 } ] } ]
+        response:
+          payload: { V: "1.0", DTS: 1760640003, I: "{sessionId}-{rand32}", R: 0 }
+
+    ProgramWriteBoost:
+      name: program.write.boost
+      title: Program write (index 2 — boost)
+      traits: [ { $ref: '#/components/messageTraits/correlationTrait' } ]
+      payload: { $ref: '#/components/schemas/ClientRequest' }
+      examples:
+        request:
+          payload:
+            V: "1.0"
+            DTS: 1760618673
+            I: "{sessionId}-{rand32}"
+            M: "Request"
+            P:
+              - { GMI: "{gatewayID}", HI: 21, SI: 17 }
+              - [ { I: 2, D: [ { O: 105, T: 1 }, { O: 525, T: 0 } ] } ]
+        response:
+          payload: { V: "1.0", DTS: 1760618673, I: "{sessionId}-{rand32}", R: 0 }
+
     ModeWritePrimary:
       name: mode.write.primary
       title: Primary immersion ON/OFF (slot 1)
       traits: [ { $ref: '#/components/messageTraits/correlationTrait' } ]
-      payload:
-        allOf:
-          - $ref: '#/components/schemas/ClientRequest'
-          - type: object
-            example:
-              V: "1.0"
-              DTS: 1760617586
-              I: "{sessionId}-{rand32}"
-              M: "Request"
-              P: [ { GMI: "{gatewayID}", HI: 2, SI: 15 }, [ 1, { I: 6, V: 2 } ] ]  # 0=Off, 2=On
+      payload: { $ref: '#/components/schemas/ClientRequest' }
+      examples:
+        request_on:
+          payload: { V: "1.0", DTS: 1760617586, I: "{sessionId}-{rand32}", M: "Request", P: [ { GMI: "{gatewayID}", HI: 2, SI: 15 }, [ 1, { I: 6, V: 2 } ] ] }
+        response:
+          payload: { V: "1.0", DTS: 1760617586, I: "{sessionId}-{rand32}", R: 0 }
+        notify:
+          payload:
+            V: "1.0"
+            M: "Notify"
+            DTS: 1760617587
+            P: [ { GMI: "{gatewayID}", SI: 33, HI: 4 }, [ 1, { I: 6, V: 2, OT: 0, D: 0 } ] ]
+
     BoostStart:
       name: boost.timed.start
       title: Boost start (slot 2)
       traits: [ { $ref: '#/components/messageTraits/correlationTrait' } ]
-      payload:
-        allOf:
-          - $ref: '#/components/schemas/ClientRequest'
-          - type: object
-            example:
-              V: "1.0"
-              DTS: 1760617839
-              I: "{sessionId}-{rand32}"
-              M: "Request"
-              P: [ { GMI: "{gatewayID}", HI: 2, SI: 16 }, [ 2, { D: 120, I: 4, OT: 2, V: 0 } ] ]
+      payload: { $ref: '#/components/schemas/ClientRequest' }
+      examples:
+        request:
+          payload: { V: "1.0", DTS: 1760617839, I: "{sessionId}-{rand32}", M: "Request", P: [ { GMI: "{gatewayID}", HI: 2, SI: 16 }, [ 2, { D: 120, I: 4, OT: 2, V: 0 } ] ] }
+        response:
+          payload: { V: "1.0", DTS: 1760617839, I: "{sessionId}-{rand32}", R: 0 }
+        notify_active:
+          payload: { V: "1.0", M: "Notify", DTS: 1760617841, P: [ { GMI: "{gatewayID}", SI: 16, HI: 4 }, [ 2, { I: 4, V: 1, OT: 2, D: 120 } ] ] }
+        notify_endtime:
+          payload: { V: "1.0", M: "Notify", DTS: 1760617840, P: [ { GMI: "{gatewayID}", SI: 16, HI: 4 }, [ 2, { I: 9, V: 930, OT: 0, D: 0 } ] ] }
+
     BoostStop:
       name: boost.timed.stop
       title: Boost stop (slot 2)
       traits: [ { $ref: '#/components/messageTraits/correlationTrait' } ]
-      payload:
-        allOf:
-          - $ref: '#/components/schemas/ClientRequest'
-          - type: object
-            example:
-              V: "1.0"
-              DTS: 1760617864
-              I: "{sessionId}-{rand32}"
-              M: "Request"
-              P: [ { GMI: "{gatewayID}", HI: 2, SI: 16 }, [ 2, { D: 0, I: 4, OT: 2, V: 0 } ] ]
+      payload: { $ref: '#/components/schemas/ClientRequest' }
+      examples:
+        request:
+          payload: { V: "1.0", DTS: 1760617864, I: "{sessionId}-{rand32}", M: "Request", P: [ { GMI: "{gatewayID}", HI: 2, SI: 16 }, [ 2, { D: 0, I: 4, OT: 2, V: 0 } ] ] }
+        response:
+          payload: { V: "1.0", DTS: 1760617864, I: "{sessionId}-{rand32}", R: 0 }
+        notify_clear:
+          payload: { V: "1.0", M: "Notify", DTS: 1760617865, P: [ { GMI: "{gatewayID}", SI: 16, HI: 4 }, [ 2, { I: 4, V: 0, OT: 0, D: 0 } ] ] }
+
     BoostToggleTimed:
       name: boost.timed.toggle
       title: Timed-boost feature toggle (slot 2)
       traits: [ { $ref: '#/components/messageTraits/correlationTrait' } ]
-      payload:
-        allOf:
-          - $ref: '#/components/schemas/ClientRequest'
-          - type: object
-            example:
-              V: "1.0"
-              DTS: 1760617844
-              I: "{sessionId}-{rand32}"
-              M: "Request"
-              P: [ { GMI: "{gatewayID}", HI: 2, SI: 16 }, [ 2, { I: 27, V: 0 } ] ]  # 0=off, 1=on
+      payload: { $ref: '#/components/schemas/ClientRequest' }
+      examples:
+        request_enable:
+          payload: { V: "1.0", DTS: 1760640809, I: "{sessionId}-{rand32}", M: "Request", P: [ { GMI: "{gatewayID}", HI: 2, SI: 16 }, [ 2, { I: 27, V: 1 } ] ] }
+        request_disable:
+          payload: { V: "1.0", DTS: 1760640845, I: "{sessionId}-{rand32}", M: "Request", P: [ { GMI: "{gatewayID}", HI: 2, SI: 16 }, [ 2, { I: 27, V: 0 } ] ] }
+        response:
+          payload: { V: "1.0", DTS: 1760640809, I: "{sessionId}-{rand32}", R: 0 }
+        notify_on:
+          payload: { V: "1.0", M: "Notify", DTS: 1760640810, P: [ { GMI: "{gatewayID}", SI: 16, HI: 4 }, [ 2, { I: 27, V: 1, OT: 0, D: 0 } ] ] }
+        notify_off:
+          payload: { V: "1.0", M: "Notify", DTS: 1760640845, P: [ { GMI: "{gatewayID}", SI: 16, HI: 4 }, [ 2, { I: 27, V: 0, OT: 0, D: 0 } ] ] }
+
+    # ----- Generic server messages (for subscription) -----
     ServerResponse:
       name: server.response
-      title: Reply envelope (R)
       traits: [ { $ref: '#/components/messageTraits/correlationTrait' } ]
-      payload:
-        $ref: '#/components/schemas/ServerResponseSchema'
+      payload: { $ref: '#/components/schemas/ServerResponseSchema' }
+
     ServerNotify:
       name: server.notify
-      title: Push notification (Notify)
       traits: [ { $ref: '#/components/messageTraits/correlationTrait' } ]
-      payload:
-        $ref: '#/components/schemas/ServerNotifySchema'
+      payload: { $ref: '#/components/schemas/ServerNotifySchema' }

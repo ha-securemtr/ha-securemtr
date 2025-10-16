@@ -1,38 +1,44 @@
 openapi: 3.1.0
 info:
-  title: Secure Controls / Beanbag Cloud API (Confirmed Subset)
-  version: "0.4.0"
-  description: >
-    Confirmed REST endpoints and WebSocket connection semantics observed from live traffic.
-    Only behaviors *directly evidenced* by captures are included.
-    All dynamic identifiers are placeholders (e.g., {token}, {sessionId}, {gatewayID}).
+  title: Secure Controls (Beanbag Cloud) — Confirmed REST & WS Handshake
+  version: "1.2.0"
+  description: |
+    This specification captures **only** behaviors **directly observed** in live captures
+    of the Secure Controls Android app (`com.secure.heatConnect`) using the vendor’s
+    Beanbag cloud. All IDs/tokens are placeholders (e.g., `{token}`, `{sessionId}`, `{gatewayID}`).
+    The WebSocket application protocol messages are cataloged in `secure_controls_asyncapi_v1.2.0.yaml`.
+
 servers:
   - url: https://app.beanbag.online
     description: Confirmed REST base
+
 tags:
   - name: Login
   - name: User
   - name: Gateway
   - name: WebSocket
+
 components:
   securitySchemes:
     bearerAuth:
       type: http
       scheme: bearer
       bearerFormat: JWT
+
   parameters:
     RequestId:
       name: Request-id
       in: header
       required: true
       schema: { type: string, example: "1" }
-      description: Observed header on REST requests. Confirmed value "1".
+      description: Observed header on REST requests; value was "1" in captures.
     SessionId:
       name: Session-id
       in: header
       required: true
       schema: { type: string, example: "{sessionId}" }
-      description: Session id from login; required on subsequent REST and in WS upgrade.
+      description: Session id from login; required in subsequent REST and in WS upgrade.
+
   schemas:
     RestEnvelope:
       type: object
@@ -40,10 +46,11 @@ components:
       properties:
         RI:
           type: string
-          description: Result indicator. Confirmed success value "1".
           example: "1"
+          description: Result indicator. Confirmed success value is the string "1".
         D:
-          description: Data payload (varies by endpoint).
+          description: Data payload (shape varies by endpoint).
+
     LoginULC:
       type: object
       required: [ ULC ]
@@ -55,12 +62,12 @@ components:
             OI:
               type: integer
               example: 1550005
-              description: Observed constant in captures.
+              description: Observed constant.
             P:
               type: string
               pattern: "^[0-9a-fA-F]{32}$"
               example: "{sha1(password)[:32]}"
-              description: Confirmed derivation: sha1(password).hexdigest() sliced to 32 hex chars.
+              description: P = SHA1(password) hex digest, **first 32 hex chars** (confirmed derivation).
             NT:
               type: string
               example: "SetLogin"
@@ -68,14 +75,15 @@ components:
               type: string
               format: email
               example: "{email}"
+
     LoginData:
       type: object
       properties:
-        UI: { type: integer, description: user id, example: 0 }
-        SI: { type: integer, description: session id, example: 0 }
+        UI: { type: integer, description: user id }
+        SI: { type: integer, description: session id }
         GD:
           type: array
-          description: Gateway descriptors (minimal fields confirmed).
+          description: Gateway descriptors (fields observed; not guaranteed exhaustive).
           items:
             type: object
             properties:
@@ -91,6 +99,7 @@ components:
         JTT: { type: integer, description: JWT timestamp (epoch ms) }
         USL: { type: array, items: {} }
         UNL: { nullable: true }
+
     UserInformationData:
       type: object
       properties:
@@ -115,10 +124,23 @@ components:
             LN: { nullable: true }
             CN: { nullable: true }
             MN: { nullable: true }
-    IsGatewayConnectedData:
-      oneOf:
-        - { type: integer, example: 1701 }
-        - { type: string }
+
+    UserListItem:
+      type: object
+      properties:
+        UI:
+          type: object
+          properties:
+            UI:  { type: integer, example: 1901131 }
+            T:   { type: string, example: "" }
+            FN:  { type: string, example: "{firstName}" }
+            LN:  { type: string, example: "{lastName}" }
+            UEI: { type: string, format: email, example: "{email}" }
+            MN:  { nullable: true }
+            ID:  { type: boolean, description: "Is default user?" }
+            CA:  { type: object }
+        UR: { type: integer, description: "User role (observed integer)" }
+
 paths:
   /api/UserRestAPI/LoginRequest:
     post:
@@ -129,10 +151,8 @@ paths:
         content:
           application/json:
             schema: { $ref: '#/components/schemas/LoginULC' }
-            examples:
-              sample:
-                value:
-                  ULC: { OI: 1550005, P: "{sha1(password)[:32]}", NT: "SetLogin", UEI: "{email}" }
+            example:
+              ULC: { OI: 1550005, P: "{sha1(password)[:32]}", NT: "SetLogin", UEI: "{email}" }
       parameters:
         - $ref: '#/components/parameters/RequestId'
       responses:
@@ -146,10 +166,11 @@ paths:
                   - type: object
                     properties:
                       D: { $ref: '#/components/schemas/LoginData' }
+
   /api/UserRestAPI/GetInstallations:
     get:
       tags: [ User ]
-      summary: Get installations (confirmed)
+      summary: Get installations (confirmed envelope)
       security: [ { bearerAuth: [] } ]
       parameters:
         - $ref: '#/components/parameters/RequestId'
@@ -162,6 +183,7 @@ paths:
               schema: { $ref: '#/components/schemas/RestEnvelope' }
               examples:
                 empty: { value: { RI: "1", D: [] } }
+
   /api/UserRestAPI/GetUserInformation:
     get:
       tags: [ User ]
@@ -181,6 +203,53 @@ paths:
                   - type: object
                     properties:
                       D: { $ref: '#/components/schemas/UserInformationData' }
+
+  /api/UserRestAPI/GetUserList:
+    get:
+      tags: [ User ]
+      summary: Get user list (confirmed)
+      security: [ { bearerAuth: [] } ]
+      parameters:
+        - $ref: '#/components/parameters/RequestId'
+        - $ref: '#/components/parameters/SessionId'
+        - name: gatewayMacId
+          in: query
+          required: true
+          schema: { type: string, example: "{gatewayID}" }
+        - name: lastUpdatedDateTime
+          in: query
+          required: true
+          schema: { type: integer, example: 0 }
+      responses:
+        '200':
+          description: Envelope with user list
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/RestEnvelope'
+                  - type: object
+                    properties:
+                      D:
+                        type: array
+                        items: { $ref: '#/components/schemas/UserListItem' }
+
+  /api/UserRestAPI/GetInvitation:
+    get:
+      tags: [ User ]
+      summary: Get pending invitations (confirmed empty array)
+      security: [ { bearerAuth: [] } ]
+      parameters:
+        - $ref: '#/components/parameters/RequestId'
+        - $ref: '#/components/parameters/SessionId'
+      responses:
+        '200':
+          description: Envelope with invitations
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/RestEnvelope' }
+              example: { RI: "1", D: [] }
+
   /api/UserRestAPI/IsGatewayConnected:
     get:
       tags: [ Gateway ]
@@ -195,37 +264,42 @@ paths:
           schema: { type: string, example: "{gatewayID}" }
       responses:
         '200':
-          description: Confirmed envelope with scalar data
+          description: Envelope with vendor connectivity code (opaque integer)
           content:
             application/json:
-              schema:
-                allOf:
-                  - $ref: '#/components/schemas/RestEnvelope'
-                  - type: object
-                    properties:
-                      D: { $ref: '#/components/schemas/IsGatewayConnectedData' }
+              schema: { $ref: '#/components/schemas/RestEnvelope' }
+              examples:
+                sample1701: { value: { RI: "1", D: 1701 } }
+                sample1702: { value: { RI: "1", D: 1702 } }
+
 x-websocket:
   description: |
-    Confirmed WebSocket connection:
-      • URL: wss://app.beanbag.online/api/TransactionRestAPI/ConnectWebSocket
-      • Subprotocol: BB-BO-01
-      • Required headers:
-          - Authorization: Bearer {token}
-          - Session-id: {sessionId}
-          - Request-id: 1
+    **WebSocket endpoint & handshake (confirmed)**
+    • URL: `wss://app.beanbag.online/api/TransactionRestAPI/ConnectWebSocket`
+    • Subprotocol: `BB-BO-01` (negotiated during the opening handshake).
+    • Required headers:
+        - `Authorization: Bearer {token}` (JWT from LoginRequest)
+        - `Session-id: {sessionId}`
+        - `Request-id: 1`
 
-    After 101 Switching Protocols, there is no app-layer "Authorize".
-    The first client frame is a JSON "Request".
+    After `101 Switching Protocols`, no extra "Authorize" frame is sent; the first
+    app-layer message is a JSON `"Request"` envelope.
 
-    Envelope (client): V="1.0", DTS=<epoch sec>, I="{sessionId}-{rand32}", M="Request", P=[ {GMI,HI,SI}, [args] ]
-    Envelope (server reply): adds "R"; Envelope (server notify): uses M="Notify" with P=[{GMI,SI,HI:4}, [slot, {I,V,OT,D}] ]
+    **Client envelope (requests):**
+    { "V":"1.0","DTS":<epoch>,"I":"{sessionId}-{rand32}","M":"Request",
+      "P":[ { "GMI":"{gatewayID}","HI":<op>,"SI":<sub> }, [ /* args */ ] ] }
 
-    Schedule (program) semantics (confirmed):
-      • program.read  (HI:22, SI:17,  [index]) returns [{ "I": index, "D":[ {"O":<minutesFromMidnight>,"T":<code>}, ... ] }]
-      • program.write (HI:21, SI:17,  [ { "I": index, "D":[ ... ] } ]) writes the entire program; reply R:0.
-      • Observed mapping: index 2 == Boost schedule (slot 2). Index 1 likely primary.
-      • Codes: T=1 => Boost ON, T=0 => Boost OFF, T=255 => sentinel/unused (padding).
-      • Each day uses a fixed number of change-points padded by {O:65535,T:255}; O is minutes since midnight.
+    **Server reply:** adds `"R"`; **Server notify:** uses `"M":"Notify"` with
+    `P:[{GMI,SI,HI:4}, [slot, {I,V,OT,D}]]`
+
+    **Refresh / bootstrap burst (observed order):**
+    1) `zones.read` (HI:49, SI:11)
+    2) `time.tick`  (HI:2,  SI:103) with `[DTS]`
+    3) `schedules.summary` (HI:5,  SI:1)
+    4) `device.metadata.read` (HI:17, SI:11)
+    5) `device.config.read`   (HI:14, SI:11)
+    6) `state.read`           (HI:3,  SI:1)
+
   connection:
     url: wss://app.beanbag.online/api/TransactionRestAPI/ConnectWebSocket
     subprotocols: [ "BB-BO-01" ]
@@ -239,77 +313,3 @@ x-websocket:
       - name: Request-id
         required: true
         example: "1"
-  confirmedCalls:
-    - name: zones.read
-      hi: 49
-      si: 11
-    - name: time.tick
-      hi: 2
-      si: 103
-      args: [ <DTS> ]
-    - name: schedules.summary
-      hi: 5
-      si: 1
-    - name: device.metadata.read
-      hi: 17
-      si: 11
-    - name: device.config.read
-      hi: 14
-      si: 11
-    - name: state.read
-      hi: 3
-      si: 1
-      responseBlocks:
-        - si: 33
-          note: primary immersion block (mode item I:6; slot=1)
-        - si: 16
-          note: boost immersion block (boost & flags; slot=2)
-    - name: energy.history.read
-      hi: 9
-      si: 36
-      args: [ <windowIndex> ]
-    - name: program.read
-      hi: 22
-      si: 17
-      args: [ <index> ]   # Observed: 2 == boost program
-    - name: program.write
-      hi: 21
-      si: 17
-      args: [ { I: <index>, D: [ { O: <minutes>, T: 0|1|255 }, ... ] } ]
-    - name: mode.write.primary
-      hi: 2
-      si: 15
-      args: [ 1, { I: 6, V: 0|2 } ]  # 0=Off, 2=On (slot 1)
-      notify:
-        block: 33
-        item: 6
-    - name: boost.timed.start
-      hi: 2
-      si: 16
-      args: [ 2, { D: <minutes>, I: 4, OT: 2, V: 0 } ]   # slot 2
-      notify:
-        block: 16
-        items:
-          - { I: 4, V: 1, OT: 2, D: <minutes|countdown> }
-          - { I: 9, V: <endTimeMinutesSinceMidnight> }
-          - { I: 10, V: 0 }  # status flag observed; semantics TBD
-      notes: >
-        Countdown Notifies are not guaranteed during a running boost.
-        Rely on I:4 (active) and I:9 (end time).
-    - name: boost.timed.stop
-      hi: 2
-      si: 16
-      args: [ 2, { D: 0, I: 4, OT: 2, V: 0 } ]
-      notify:
-        block: 16
-        items:
-          - { I: 4, V: 0, OT: 0, D: 0 }
-          - { I: 9, V: <baselineMinutes> }
-          - { I: 10, V: 0 }
-    - name: boost.timed.toggle
-      hi: 2
-      si: 16
-      args: [ 2, { I: 27, V: 0|1 } ]  # 0=off, 1=on
-      notify:
-        block: 16
-        item: 27
