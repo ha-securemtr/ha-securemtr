@@ -26,7 +26,7 @@ from custom_components.securemtr import (
     async_setup_entry,
     async_unload_entry,
 )
-from custom_components.securemtr.beanbag import BeanbagSession
+from custom_components.securemtr.beanbag import BeanbagGateway, BeanbagSession
 from custom_components.securemtr.config_flow import SecuremtrConfigFlow
 
 
@@ -65,9 +65,17 @@ class DummyBackend:
             session_id="session-id",
             token="jwt-token",
             token_timestamp=None,
-            gateways=(),
+            gateways=(
+                BeanbagGateway(
+                    gateway_id="gateway-1",
+                    serial_number="serial-1",
+                    host_name="host-name",
+                    capabilities={},
+                ),
+            ),
         )
         self.websocket = DummyWebSocket()
+        self.metadata_calls: list[str] = []
 
     async def login_and_connect(
         self, email: str, password_digest: str
@@ -76,6 +84,20 @@ class DummyBackend:
 
         self.login_calls.append((email, password_digest))
         return self.session, self.websocket
+
+    async def read_device_metadata(
+        self, session: BeanbagSession, websocket: DummyWebSocket, gateway_id: str
+    ) -> dict[str, str]:
+        """Return canned metadata for the configured controller."""
+
+        self.metadata_calls.append(gateway_id)
+        return {
+            "BOI": "controller-1",
+            "N": "Test Controller",
+            "SN": "serial-1",
+            "FV": "1.0.0",
+            "MD": "E7+",
+        }
 
 
 @pytest.fixture
