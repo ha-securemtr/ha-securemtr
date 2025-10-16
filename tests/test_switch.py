@@ -94,11 +94,13 @@ async def test_switch_setup_creates_entity() -> None:
     assert len(entities) == 1
     switch = entities[0]
     assert switch.available
-    assert switch.unique_id == "controller_1_primary_power"
-    assert switch.device_info["identifiers"] == {(DOMAIN, "controller-1")}
+    assert switch.unique_id == "serial_1_primary_power"
+    assert switch.device_info["identifiers"] == {(DOMAIN, "serial-1")}
+    assert switch.device_info["name"] == "E7+"
+    assert switch.device_info["model"] == "E7+"
     assert (
         switch.name
-        == "E7+ Controller controller-1 Water Heater"
+        == "Secure Meters E7+ serial-1 Water Heater"
     )
     assert switch.is_on is False
 
