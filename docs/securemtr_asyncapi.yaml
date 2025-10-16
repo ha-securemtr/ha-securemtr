@@ -1,0 +1,309 @@
+asyncapi: 2.6.0
+info:
+  title: Secure Controls / Beanbag WebSocket API (Confirmed Subset)
+  version: "0.4.0"
+  description: >
+    Confirmed WebSocket channel and message shapes observed from live traffic.
+    Water heater with two immersion circuits:
+      • slot 1 → primary immersion (block SI:33), on/off via mode write
+      • slot 2 → boost immersion (block SI:16), timed boost & toggle
+servers:
+  production:
+    url: wss://app.beanbag.online
+    protocol: wss
+    description: Beanbag cloud WebSocket endpoint (confirmed)
+    bindings:
+      ws:
+        headers:
+          type: object
+          required: [ Authorization, Session-id, Request-id ]
+          properties:
+            Authorization:
+              type: string
+              description: Bearer {token} from REST login
+              examples: ["Bearer {token}"]
+            Session-id:
+              type: string
+              description: {sessionId} from REST login
+              examples: ["{sessionId}"]
+            Request-id:
+              type: string
+              description: Observed constant "1"
+              examples: ["1"]
+channels:
+  api/TransactionRestAPI/ConnectWebSocket:
+    description: Confirmed single WS channel; subprotocol must be BB-BO-01
+    bindings:
+      ws:
+        protocol: BB-BO-01
+    publish:
+      summary: Client → Server (send Request frames)
+      message:
+        oneOf:
+          - $ref: '#/components/messages/ZonesRead'
+          - $ref: '#/components/messages/TimeTick'
+          - $ref: '#/components/messages/SchedulesSummary'
+          - $ref: '#/components/messages/MetadataRead'
+          - $ref: '#/components/messages/ConfigRead'
+          - $ref: '#/components/messages/StateRead'
+          - $ref: '#/components/messages/EnergyHistoryRead'
+          - $ref: '#/components/messages/ProgramRead'
+          - $ref: '#/components/messages/ProgramWrite'
+          - $ref: '#/components/messages/ModeWritePrimary'
+          - $ref: '#/components/messages/BoostStart'
+          - $ref: '#/components/messages/BoostStop'
+          - $ref: '#/components/messages/BoostToggleTimed'
+    subscribe:
+      summary: Server → Client (responses and notifications)
+      message:
+        oneOf:
+          - $ref: '#/components/messages/ServerResponse'
+          - $ref: '#/components/messages/ServerNotify'
+components:
+  messageTraits:
+    correlationTrait:
+      correlationId:
+        description: Correlates replies with requests; server echoes this value.
+        location: "$message.payload#/I"
+  schemas:
+    EnvelopeBase:
+      type: object
+      required: [ V, DTS, I ]
+      properties:
+        V:   { type: string, const: "1.0" }
+        DTS: { type: integer, description: Epoch seconds }
+        I:   { type: string, description: "{sessionId}-{signed_32bit_random}" }
+    ClientRequest:
+      allOf:
+        - $ref: '#/components/schemas/EnvelopeBase'
+        - type: object
+          required: [ M, P ]
+          properties:
+            M: { type: string, const: "Request" }
+            P:
+              type: array
+              description: >
+                Positional args; first element is header {"GMI","HI","SI"}.
+                Second element (optional) is an arguments array for the specific op.
+              items: {}
+    ServerResponseSchema:
+      allOf:
+        - $ref: '#/components/schemas/EnvelopeBase'
+        - type: object
+          required: [ R ]
+          properties:
+            R: {}
+    ServerNotifySchema:
+      allOf:
+        - $ref: '#/components/schemas/EnvelopeBase'
+        - type: object
+          required: [ M, P ]
+          properties:
+            M: { type: string, const: "Notify" }
+            P:
+              type: array
+              description: '[ { "GMI": "...", "SI": <block>, "HI": 4 }, [ <slot>, { "I": <itemId>, "V": <value>, "OT": <opType>, "D": <aux> } ] ]'
+              items: {}
+  messages:
+    ZonesRead:
+      name: zones.read
+      title: Zones / topology
+      traits: [ { $ref: '#/components/messageTraits/correlationTrait' } ]
+      payload:
+        allOf:
+          - $ref: '#/components/schemas/ClientRequest'
+          - type: object
+            example:
+              V: "1.0"
+              DTS: 1760617091
+              I: "{sessionId}-{rand32}"
+              M: "Request"
+              P: [ { GMI: "{gatewayID}", HI: 49, SI: 11 } ]
+    TimeTick:
+      name: time.tick
+      title: Keepalive / clock
+      traits: [ { $ref: '#/components/messageTraits/correlationTrait' } ]
+      payload:
+        allOf:
+          - $ref: '#/components/schemas/ClientRequest'
+          - type: object
+            example:
+              V: "1.0"
+              DTS: 1760617091
+              I: "{sessionId}-{rand32}"
+              M: "Request"
+              P: [ { GMI: "{gatewayID}", HI: 2, SI: 103 }, [ 1760617091 ] ]
+    SchedulesSummary:
+      name: schedules.summary
+      title: Schedules overview
+      traits: [ { $ref: '#/components/messageTraits/correlationTrait' } ]
+      payload:
+        allOf:
+          - $ref: '#/components/schemas/ClientRequest'
+          - type: object
+            example:
+              V: "1.0"
+              DTS: 1760617092
+              I: "{sessionId}-{rand32}"
+              M: "Request"
+              P: [ { GMI: "{gatewayID}", HI: 5, SI: 1 } ]
+    MetadataRead:
+      name: device.metadata.read
+      title: Device metadata
+      traits: [ { $ref: '#/components/messageTraits/correlationTrait' } ]
+      payload:
+        allOf:
+          - $ref: '#/components/schemas/ClientRequest'
+          - type: object
+            example:
+              V: "1.0"
+              DTS: 1760617092
+              I: "{sessionId}-{rand32}"
+              M: "Request"
+              P: [ { GMI: "{gatewayID}", HI: 17, SI: 11 } ]
+    ConfigRead:
+      name: device.config.read
+      title: Config parameters
+      traits: [ { $ref: '#/components/messageTraits/correlationTrait' } ]
+      payload:
+        allOf:
+          - $ref: '#/components/schemas/ClientRequest'
+          - type: object
+            example:
+              V: "1.0"
+              DTS: 1760617092
+              I: "{sessionId}-{rand32}"
+              M: "Request"
+              P: [ { GMI: "{gatewayID}", HI: 14, SI: 11 } ]
+    StateRead:
+      name: state.read
+      title: Live state (blocks)
+      traits: [ { $ref: '#/components/messageTraits/correlationTrait' } ]
+      payload:
+        allOf:
+          - $ref: '#/components/schemas/ClientRequest'
+          - type: object
+            example:
+              V: "1.0"
+              DTS: 1760617092
+              I: "{sessionId}-{rand32}"
+              M: "Request"
+              P: [ { GMI: "{gatewayID}", HI: 3, SI: 1 } ]
+    EnergyHistoryRead:
+      name: energy.history.read
+      title: Energy/consumption history
+      traits: [ { $ref: '#/components/messageTraits/correlationTrait' } ]
+      payload:
+        allOf:
+          - $ref: '#/components/schemas/ClientRequest'
+          - type: object
+            example:
+              V: "1.0"
+              DTS: 1760615960
+              I: "{sessionId}-{rand32}"
+              M: "Request"
+              P: [ { GMI: "{gatewayID}", HI: 9, SI: 36 }, [ 1 ] ]
+    ProgramRead:
+      name: program.read
+      title: Program read (by index)
+      traits: [ { $ref: '#/components/messageTraits/correlationTrait' } ]
+      payload:
+        allOf:
+          - $ref: '#/components/schemas/ClientRequest'
+          - type: object
+            example:
+              V: "1.0"
+              DTS: 1760618568
+              I: "{sessionId}-{rand32}"
+              M: "Request"
+              P: [ { GMI: "{gatewayID}", HI: 22, SI: 17 }, [ 2 ] ]  # index 2 = boost program
+      examples:
+        semantics:
+          summary: Program entry
+          description: >
+            Reply payload: [{ "I": 2, "D":[ {"O":<minutesFromMidnight>, "T": 0|1|255}, ... ] }]
+            T codes: 1=Boost ON, 0=Boost OFF, 255=sentinel/unused; O is minutes since midnight.
+    ProgramWrite:
+      name: program.write
+      title: Program write (by index)
+      traits: [ { $ref: '#/components/messageTraits/correlationTrait' } ]
+      payload:
+        allOf:
+          - $ref: '#/components/schemas/ClientRequest'
+          - type: object
+            example:
+              V: "1.0"
+              DTS: 1760618673
+              I: "{sessionId}-{rand32}"
+              M: "Request"
+              P:
+                - { GMI: "{gatewayID}", HI: 21, SI: 17 }
+                - [ { I: 2, D: [ { O: 105, T: 1 }, { O: 525, T: 0 } ] } ]  # Sunday: on 01:45, off 08:45
+    ModeWritePrimary:
+      name: mode.write.primary
+      title: Primary immersion ON/OFF (slot 1)
+      traits: [ { $ref: '#/components/messageTraits/correlationTrait' } ]
+      payload:
+        allOf:
+          - $ref: '#/components/schemas/ClientRequest'
+          - type: object
+            example:
+              V: "1.0"
+              DTS: 1760617586
+              I: "{sessionId}-{rand32}"
+              M: "Request"
+              P: [ { GMI: "{gatewayID}", HI: 2, SI: 15 }, [ 1, { I: 6, V: 2 } ] ]  # 0=Off, 2=On
+    BoostStart:
+      name: boost.timed.start
+      title: Boost start (slot 2)
+      traits: [ { $ref: '#/components/messageTraits/correlationTrait' } ]
+      payload:
+        allOf:
+          - $ref: '#/components/schemas/ClientRequest'
+          - type: object
+            example:
+              V: "1.0"
+              DTS: 1760617839
+              I: "{sessionId}-{rand32}"
+              M: "Request"
+              P: [ { GMI: "{gatewayID}", HI: 2, SI: 16 }, [ 2, { D: 120, I: 4, OT: 2, V: 0 } ] ]
+    BoostStop:
+      name: boost.timed.stop
+      title: Boost stop (slot 2)
+      traits: [ { $ref: '#/components/messageTraits/correlationTrait' } ]
+      payload:
+        allOf:
+          - $ref: '#/components/schemas/ClientRequest'
+          - type: object
+            example:
+              V: "1.0"
+              DTS: 1760617864
+              I: "{sessionId}-{rand32}"
+              M: "Request"
+              P: [ { GMI: "{gatewayID}", HI: 2, SI: 16 }, [ 2, { D: 0, I: 4, OT: 2, V: 0 } ] ]
+    BoostToggleTimed:
+      name: boost.timed.toggle
+      title: Timed-boost feature toggle (slot 2)
+      traits: [ { $ref: '#/components/messageTraits/correlationTrait' } ]
+      payload:
+        allOf:
+          - $ref: '#/components/schemas/ClientRequest'
+          - type: object
+            example:
+              V: "1.0"
+              DTS: 1760617844
+              I: "{sessionId}-{rand32}"
+              M: "Request"
+              P: [ { GMI: "{gatewayID}", HI: 2, SI: 16 }, [ 2, { I: 27, V: 0 } ] ]  # 0=off, 1=on
+    ServerResponse:
+      name: server.response
+      title: Reply envelope (R)
+      traits: [ { $ref: '#/components/messageTraits/correlationTrait' } ]
+      payload:
+        $ref: '#/components/schemas/ServerResponseSchema'
+    ServerNotify:
+      name: server.notify
+      title: Push notification (Notify)
+      traits: [ { $ref: '#/components/messageTraits/correlationTrait' } ]
+      payload:
+        $ref: '#/components/schemas/ServerNotifySchema'
