@@ -265,9 +265,6 @@ def _build_controller(
         (candidate for candidate in identifier_candidates if candidate), DOMAIN
     )
 
-    raw_name = metadata.get("N") or "SecureMTR Controller"
-    name = str(raw_name).strip() or f"SecureMTR {identifier}"
-
     serial_value = metadata.get("SN")
     serial_number = (
         str(serial_value).strip()
@@ -289,6 +286,25 @@ def _build_controller(
         str(model_value).strip()
         if isinstance(model_value, (str, int, float)) and str(model_value).strip()
         else None
+    )
+
+    raw_name = metadata.get("N")
+    if isinstance(raw_name, (str, int, float)):
+        candidate_name = str(raw_name).strip()
+    else:
+        candidate_name = ""
+
+    serial_display = serial_number or identifier
+    default_name = (
+        f"E7+ Water Heater (SN: {serial_number})"
+        if serial_number
+        else f"E7+ Water Heater ({serial_display})"
+    )
+
+    name = (
+        candidate_name
+        if candidate_name and not candidate_name.isdigit()
+        else default_name
     )
 
     return SecuremtrController(
