@@ -192,7 +192,7 @@ async def test_async_setup_entry_starts_backend(
     assert runtime.controller.identifier == "controller-1"
     assert backend.login_calls == [("user@example.com", "digest")]
     assert backend.metadata_calls[0] == "gateway-1"
-    assert hass.config_entries.forwarded == [("button",)]
+    assert hass.config_entries.forwarded == [("switch",)]
 
 
 @pytest.mark.asyncio
@@ -394,7 +394,7 @@ async def test_async_unload_entry_cleans_up(monkeypatch: pytest.MonkeyPatch) -> 
     assert backend.websocket.close_calls == 1
     await asyncio.sleep(0)
     assert runtime.startup_task.cancelled()
-    assert hass.config_entries.unloaded == [("button",)]
+    assert hass.config_entries.unloaded == [("switch",)]
 
 
 @pytest.mark.asyncio

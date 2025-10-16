@@ -1,7 +1,7 @@
 [project]
 name = "ha-securemtr"
 version = "0.1.0"
-description = "E7+ Secure Meters Smart Boiler Controller integration for Home Assistant"
+description = "E7+ Secure Meters Smart Water Heater Controller integration for Home Assistant"
 readme = "README.md"
 authors = [{ name = "ha-securemtr" }]
 requires-python = ">=3.13.2"

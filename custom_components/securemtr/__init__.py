@@ -72,10 +72,10 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
     config_entries_helper = getattr(hass, "config_entries", None)
     if config_entries_helper is not None:
-        await config_entries_helper.async_forward_entry_setups(entry, ["button"])
+        await config_entries_helper.async_forward_entry_setups(entry, ["switch"])
     else:
         _LOGGER.debug(
-            "config_entries helper unavailable; skipping button platform setup for %s",
+            "config_entries helper unavailable; skipping switch platform setup for %s",
             entry_identifier,
         )
 
@@ -94,12 +94,12 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     config_entries_helper = getattr(hass, "config_entries", None)
     if config_entries_helper is not None:
         unload_ok = await config_entries_helper.async_unload_platforms(
-            entry, ["button"]
+            entry, ["switch"]
         )
     else:
         unload_ok = True
         _LOGGER.debug(
-            "config_entries helper unavailable; skipping button platform unload for %s",
+            "config_entries helper unavailable; skipping switch platform unload for %s",
             entry_identifier,
         )
 
