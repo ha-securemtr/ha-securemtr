@@ -7,6 +7,7 @@ custom_components.securemtr.__init__.async_unload_entry: Unload a securemtr conf
 custom_components.securemtr.__init__._async_start_backend: Authenticate with Beanbag and establish the WebSocket connection.
 custom_components.securemtr.__init__._async_fetch_controller: Retrieve controller metadata via the Beanbag WebSocket.
 custom_components.securemtr.__init__._build_controller: Translate metadata and gateway context into a controller object.
+custom_components.securemtr.__init__._normalize_identifier: Return a sanitized identifier candidate when possible.
 custom_components.securemtr.config_flow.SecuremtrConfigFlow.async_step_user: Handle the initial user configuration step, enforcing the Secure Controls 12-character password limit, storing the MD5 digest, and assigning a generic entry title.
 custom_components.securemtr.beanbag.BeanbagHttpClient.login: Execute the documented Beanbag login flow while emitting sanitized diagnostics and validating the response payload.
 custom_components.securemtr.beanbag.BeanbagHttpClient._parse_gateway: Translate raw gateway payload into an object.

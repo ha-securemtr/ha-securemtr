@@ -674,6 +674,38 @@ def test_build_controller_ignores_numeric_name() -> None:
     assert controller.serial_number == "E0031158"
 
 
+def test_build_controller_skips_none_identifiers() -> None:
+    """Ensure metadata values of None do not become literal identifiers."""
+
+    metadata = {"BOI": None, "SN": None, "N": "E7+"}
+    gateway = BeanbagGateway(
+        gateway_id="gateway-99",
+        serial_number=None,
+        host_name="host",
+        capabilities={},
+    )
+
+    controller = _build_controller(metadata, gateway)
+    assert controller.identifier == "gateway-99"
+    assert controller.name == "E7+"
+
+
+def test_build_controller_skips_boolean_identifiers() -> None:
+    """Ensure boolean metadata does not produce identifier strings."""
+
+    metadata = {"BOI": True, "SN": False, "N": "Unit"}
+    gateway = BeanbagGateway(
+        gateway_id="gateway-flag",
+        serial_number=None,
+        host_name="host",
+        capabilities={},
+    )
+
+    controller = _build_controller(metadata, gateway)
+    assert controller.identifier == "gateway-flag"
+    assert controller.name == "Unit"
+
+
 def test_entry_display_name_prefers_title() -> None:
     """Ensure the helper surfaces a provided title."""
 
