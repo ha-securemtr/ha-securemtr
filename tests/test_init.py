@@ -22,6 +22,7 @@ from custom_components.securemtr.beanbag import (
     BeanbagError,
     BeanbagGateway,
     BeanbagSession,
+    BeanbagStateSnapshot,
 )
 
 
@@ -55,7 +56,12 @@ class FakeBeanbagBackend:
     def __init__(self, session: object) -> None:
         self.session = session
         self.login_calls: list[tuple[str, str]] = []
+        self.zone_calls: list[str] = []
+        self.clock_calls: list[tuple[str, int]] = []
+        self.schedule_calls: list[str] = []
         self.metadata_calls: list[str] = []
+        self.configuration_calls: list[str] = []
+        self.state_calls: list[str] = []
         self._session = BeanbagSession(
             user_id=1,
             session_id="session-id",
@@ -94,19 +100,69 @@ class FakeBeanbagBackend:
             "MD": "E7+",
         }
 
+    async def read_zone_topology(
+        self, session: BeanbagSession, websocket: FakeWebSocket, gateway_id: str
+    ) -> list[dict[str, str]]:
+        """Return a single synthetic zone entry."""
+
+        self.zone_calls.append(gateway_id)
+        return [{"ZN": 1, "ZNM": "Primary"}]
+
+    async def sync_gateway_clock(
+        self,
+        session: BeanbagSession,
+        websocket: FakeWebSocket,
+        gateway_id: str,
+        *,
+        timestamp: int | None = None,
+    ) -> None:
+        """Record the timestamp used for controller clock alignment."""
+
+        self.clock_calls.append((gateway_id, int(timestamp or 0)))
+
+    async def read_schedule_overview(
+        self, session: BeanbagSession, websocket: FakeWebSocket, gateway_id: str
+    ) -> dict[str, list[object]]:
+        """Return a canned schedule overview payload."""
+
+        self.schedule_calls.append(gateway_id)
+        return {"V": []}
+
+    async def read_device_configuration(
+        self, session: BeanbagSession, websocket: FakeWebSocket, gateway_id: str
+    ) -> dict[str, list[object]]:
+        """Return canned configuration data."""
+
+        self.configuration_calls.append(gateway_id)
+        return {"V": []}
+
+    async def read_live_state(
+        self, session: BeanbagSession, websocket: FakeWebSocket, gateway_id: str
+    ) -> BeanbagStateSnapshot:
+        """Return a state snapshot with the primary power enabled."""
+
+        self.state_calls.append(gateway_id)
+        payload = {
+            "V": [
+                {"I": 1, "SI": 33, "V": [{"I": 6, "V": 2}]},
+                {"I": 2, "SI": 16, "V": []},
+            ]
+        }
+        return BeanbagStateSnapshot(payload=payload, primary_power_on=True)
+
     async def turn_controller_on(
         self, session: BeanbagSession, websocket: FakeWebSocket, gateway_id: str
     ) -> None:
         """Pretend to send the power-on command."""
 
-        self.metadata_calls.append(f"on:{gateway_id}")
+        self.state_calls.append(f"on:{gateway_id}")
 
     async def turn_controller_off(
         self, session: BeanbagSession, websocket: FakeWebSocket, gateway_id: str
     ) -> None:
         """Pretend to send the power-off command."""
 
-        self.metadata_calls.append(f"off:{gateway_id}")
+        self.state_calls.append(f"off:{gateway_id}")
 
 
 class FakeConfigEntries:
@@ -191,7 +247,25 @@ async def test_async_setup_entry_starts_backend(
     assert runtime.controller is not None
     assert runtime.controller.identifier == "controller-1"
     assert backend.login_calls == [("user@example.com", "digest")]
-    assert backend.metadata_calls[0] == "gateway-1"
+    assert backend.zone_calls == ["gateway-1"]
+    assert backend.schedule_calls == ["gateway-1"]
+    assert backend.metadata_calls == ["gateway-1"]
+    assert backend.configuration_calls == ["gateway-1"]
+    assert backend.state_calls[0] == "gateway-1"
+    assert backend.clock_calls == [("gateway-1", 0)]
+    assert runtime.zone_topology == [{"ZN": 1, "ZNM": "Primary"}]
+    assert runtime.schedule_overview == {"V": []}
+    assert runtime.device_metadata == {
+        "BOI": "controller-1",
+        "N": "E7+ Controller",
+        "SN": "serial-1",
+        "FV": "1.0.0",
+        "MD": "E7+",
+    }
+    assert runtime.device_configuration == {"V": []}
+    assert runtime.state_snapshot is not None
+    assert runtime.state_snapshot.primary_power_on is True
+    assert runtime.primary_power_on is True
     assert hass.config_entries.forwarded == [("switch",)]
 
 
@@ -238,6 +312,50 @@ async def test_async_setup_entry_handles_missing_gateways(
     runtime = hass.data[DOMAIN][entry.entry_id]
     assert runtime.controller is None
     assert runtime.controller_ready.is_set()
+
+
+@pytest.mark.asyncio
+async def test_async_setup_entry_logs_clock_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Ensure clock sync errors do not abort controller discovery."""
+
+    hass = FakeHass()
+    entry = DummyConfigEntry(
+        entry_id="clock-failure",
+        unique_id="user@example.com",
+        data={"email": "user@example.com", "password": "digest"},
+    )
+
+    class ClockErrorBackend(FakeBeanbagBackend):
+        async def sync_gateway_clock(
+            self,
+            session: BeanbagSession,
+            websocket: FakeWebSocket,
+            gateway_id: str,
+            *,
+            timestamp: int | None = None,
+        ) -> None:
+            raise BeanbagError("clock-failed")
+
+    fake_session = object()
+    backend = ClockErrorBackend(fake_session)
+
+    monkeypatch.setattr(
+        "custom_components.securemtr.async_get_clientsession",
+        lambda hass_obj: fake_session,
+    )
+    monkeypatch.setattr(
+        "custom_components.securemtr.BeanbagBackend",
+        lambda session: backend,
+    )
+
+    assert await async_setup_entry(hass, entry)
+    await hass.async_block_till_done()
+
+    runtime = hass.data[DOMAIN][entry.entry_id]
+    assert runtime.controller is not None
+    assert runtime.zone_topology == [{"ZN": 1, "ZNM": "Primary"}]
 
 
 @pytest.mark.asyncio

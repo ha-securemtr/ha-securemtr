@@ -14,7 +14,13 @@ from homeassistant.const import CONF_EMAIL, CONF_PASSWORD
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
 
-from .beanbag import BeanbagBackend, BeanbagError, BeanbagGateway, BeanbagSession
+from .beanbag import (
+    BeanbagBackend,
+    BeanbagError,
+    BeanbagGateway,
+    BeanbagSession,
+    BeanbagStateSnapshot,
+)
 
 DOMAIN = "securemtr"
 
@@ -33,6 +39,11 @@ class SecuremtrRuntimeData:
     controller_ready: asyncio.Event = field(default_factory=asyncio.Event)
     command_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
     primary_power_on: bool | None = None
+    zone_topology: list[dict[str, Any]] | None = None
+    schedule_overview: dict[str, Any] | None = None
+    device_metadata: dict[str, Any] | None = None
+    device_configuration: dict[str, Any] | None = None
+    state_snapshot: BeanbagStateSnapshot | None = None
 
 
 def _entry_display_name(entry: ConfigEntry) -> str:
@@ -162,7 +173,6 @@ async def _async_start_backend(
         )
     else:
         runtime.controller = controller
-        runtime.primary_power_on = False
         _LOGGER.info(
             "Discovered securemtr controller %s (%s)",
             controller.identifier,
@@ -204,9 +214,39 @@ async def _async_fetch_controller(
         )
 
     gateway = session.gateways[0]
-    metadata = await runtime.backend.read_device_metadata(
+    backend = runtime.backend
+
+    runtime.zone_topology = await backend.read_zone_topology(
         session, websocket, gateway.gateway_id
     )
+
+    try:
+        await backend.sync_gateway_clock(session, websocket, gateway.gateway_id)
+    except BeanbagError:
+        _LOGGER.warning(
+            "Secure Meters controller clock synchronisation failed for %s",
+            entry_identifier,
+        )
+
+    runtime.schedule_overview = await backend.read_schedule_overview(
+        session, websocket, gateway.gateway_id
+    )
+
+    metadata = await backend.read_device_metadata(
+        session, websocket, gateway.gateway_id
+    )
+    runtime.device_metadata = metadata
+
+    runtime.device_configuration = await backend.read_device_configuration(
+        session, websocket, gateway.gateway_id
+    )
+
+    state_snapshot = await backend.read_live_state(
+        session, websocket, gateway.gateway_id
+    )
+    runtime.state_snapshot = state_snapshot
+    runtime.primary_power_on = state_snapshot.primary_power_on
+
     return _build_controller(metadata, gateway)
 
 

@@ -15,10 +15,16 @@ custom_components.securemtr.beanbag.BeanbagWebSocketClient._build_ws_url: Constr
 custom_components.securemtr.beanbag.BeanbagBackend.login: Authenticate with the Beanbag REST API and record sanitized tracing logs.
 custom_components.securemtr.beanbag.BeanbagBackend.connect_websocket: Connect to the Beanbag WebSocket using the login session while preserving credential privacy in logs.
 custom_components.securemtr.beanbag.BeanbagBackend.login_and_connect: Run the login flow and immediately open the WebSocket with high-level handshake logging.
+custom_components.securemtr.beanbag.BeanbagBackend.read_zone_topology: Retrieve the configured immersion zones for the gateway.
+custom_components.securemtr.beanbag.BeanbagBackend.sync_gateway_clock: Align the controller clock with the current epoch timestamp.
+custom_components.securemtr.beanbag.BeanbagBackend.read_schedule_overview: Fetch the summary of configured boost and heating schedules.
 custom_components.securemtr.beanbag.BeanbagBackend.read_device_metadata: Fetch the controller metadata block via the WebSocket.
+custom_components.securemtr.beanbag.BeanbagBackend.read_device_configuration: Fetch controller configuration parameters via the WebSocket.
+custom_components.securemtr.beanbag.BeanbagBackend.read_live_state: Read the live state blocks and derive the primary power flag.
 custom_components.securemtr.beanbag.BeanbagBackend.turn_controller_on: Send the WebSocket command to enable the primary immersion.
 custom_components.securemtr.beanbag.BeanbagBackend.turn_controller_off: Send the WebSocket command to disable the primary immersion.
 custom_components.securemtr.beanbag.BeanbagBackend._set_primary_mode: Issue the documented primary mode write command.
+custom_components.securemtr.beanbag.BeanbagBackend._extract_primary_power: Return the primary power boolean from a live state payload.
 custom_components.securemtr.beanbag.BeanbagBackend._send_request: Send a request frame and await the matching response payload.
 custom_components.securemtr.switch.async_setup_entry: Set up Secure Meters switch entities for a config entry.
 custom_components.securemtr.switch.SecuremtrPowerSwitch.is_on: Return whether the controller reports the primary power as on.
