@@ -1,0 +1,17 @@
+{
+  "domain": "securemtr",
+  "name": "Securemtr",
+  "after_dependencies": ["recorder"],
+  "codeowners": [
+    "@ha-securemtr"
+  ],
+  "config_flow": true,
+  "documentation": "https://github.com/ha-securemtr/ha-securemtr#readme",
+  "iot_class": "cloud_push",
+  "issue_tracker": "https://github.com/ha-securemtr/ha-securemtr/issues",
+  "loggers": [
+    "custom_components.securemtr"
+  ],
+  "requirements": ["python-socketio==5.13.0"],
+  "version": "0.1.0"
+}
