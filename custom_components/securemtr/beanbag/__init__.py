@@ -17,6 +17,12 @@ from yarl import URL
 
 _LOGGER = logging.getLogger(__name__)
 
+EMAIL_PLACEHOLDER = "{email}"
+PASSWORD_DIGEST_PLACEHOLDER = "{password_digest}"
+TOKEN_PLACEHOLDER = "{token}"
+SESSION_ID_PLACEHOLDER = "{session_id}"
+USER_ID_PLACEHOLDER = "{user_id}"
+
 REST_BASE_URL = "https://app.beanbag.online"
 LOGIN_PATH = "/api/UserRestAPI/LoginRequest"
 WS_PATH = "/api/TransactionRestAPI/ConnectWebSocket"
@@ -77,7 +83,9 @@ class BeanbagHttpClient:
         if len(password_digest) != 32 or not all(
             ch in "0123456789abcdefABCDEF" for ch in password_digest
         ):
-            raise ValueError("Password digest must be a 32-character hexadecimal string")
+            raise ValueError(
+                "Password digest must be a 32-character hexadecimal string"
+            )
 
         payload = {
             "ULC": {
@@ -90,28 +98,60 @@ class BeanbagHttpClient:
         url = f"{self._base_url}{LOGIN_PATH}"
         headers = {"Request-id": REQUEST_ID}
 
-        _LOGGER.info("Starting Beanbag login request for %s", normalized_email)
+        sanitized_payload = {
+            "ULC": {
+                "OI": 1550005,
+                "P": PASSWORD_DIGEST_PLACEHOLDER,
+                "NT": "SetLogin",
+                "UEI": EMAIL_PLACEHOLDER,
+            }
+        }
+        _LOGGER.info("Starting Beanbag login request for %s", EMAIL_PLACEHOLDER)
+        _LOGGER.debug(
+            "Beanbag login POST %s with headers=%s payload=%s",
+            url,
+            {"Request-id": REQUEST_ID},
+            sanitized_payload,
+        )
 
         try:
-            async with self._session.post(url, json=payload, headers=headers) as response:
+            async with self._session.post(
+                url, json=payload, headers=headers
+            ) as response:
                 status = response.status
                 try:
                     body = await response.json(content_type=None)
                 except (ContentTypeError, ValueError) as error:
+                    _LOGGER.error(
+                        "Beanbag login response was not valid JSON for %s",
+                        EMAIL_PLACEHOLDER,
+                    )
                     raise BeanbagLoginError(
                         "Beanbag login response was not valid JSON",
                     ) from error
         except ClientError as error:
+            _LOGGER.error(
+                "Beanbag login request failed for %s: %s", EMAIL_PLACEHOLDER, error
+            )
             raise BeanbagLoginError("Beanbag login request failed") from error
 
         if status != 200:
+            _LOGGER.error(
+                "Unexpected HTTP status %s during Beanbag login for %s",
+                status,
+                EMAIL_PLACEHOLDER,
+            )
             raise BeanbagLoginError(f"Unexpected HTTP status {status} during login")
 
         if body.get("RI") != "1":
+            _LOGGER.error("Beanbag login rejected by server for %s", EMAIL_PLACEHOLDER)
             raise BeanbagLoginError("Beanbag login rejected by server")
 
         data = body.get("D")
         if not isinstance(data, dict):
+            _LOGGER.error(
+                "Beanbag login payload missing session data for %s", EMAIL_PLACEHOLDER
+            )
             raise BeanbagLoginError("Beanbag login payload missing session data")
 
         try:
@@ -119,7 +159,13 @@ class BeanbagHttpClient:
             user_id = int(data["UI"])
             token = str(data["JT"])
         except (KeyError, TypeError, ValueError) as error:
-            raise BeanbagLoginError("Beanbag login response missing required fields") from error
+            _LOGGER.error(
+                "Beanbag login response missing required fields for %s",
+                EMAIL_PLACEHOLDER,
+            )
+            raise BeanbagLoginError(
+                "Beanbag login response missing required fields"
+            ) from error
 
         token_timestamp = data.get("JTT") if isinstance(data.get("JTT"), int) else None
 
@@ -148,7 +194,16 @@ class BeanbagHttpClient:
 
         gateways = tuple(self._parse_gateway(gateway) for gateway in gateways_raw)
 
-        _LOGGER.info("Beanbag login succeeded for %s", normalized_email)
+        _LOGGER.debug(
+            "Beanbag login returned %s gateways for %s",
+            len(gateways),
+            EMAIL_PLACEHOLDER,
+        )
+        _LOGGER.info(
+            "Beanbag login succeeded with %s and %s",
+            USER_ID_PLACEHOLDER,
+            TOKEN_PLACEHOLDER,
+        )
 
         return BeanbagSession(
             user_id=user_id,
@@ -165,7 +220,9 @@ class BeanbagHttpClient:
         gateway_id = str(raw.get("GMI", ""))
         serial_number = raw.get("SN")
         host_name = raw.get("HN")
-        capabilities = {key: raw[key] for key in ("CS", "UR", "HI", "DT", "DN") if key in raw}
+        capabilities = {
+            key: raw[key] for key in ("CS", "UR", "HI", "DT", "DN") if key in raw
+        }
         return BeanbagGateway(
             gateway_id=gateway_id,
             serial_number=serial_number if isinstance(serial_number, str) else None,
@@ -192,7 +249,18 @@ class BeanbagWebSocketClient:
             "Request-id": REQUEST_ID,
         }
 
-        _LOGGER.info("Opening Beanbag WebSocket for session %s", session.session_id)
+        sanitized_headers = {
+            "Authorization": f"Bearer {TOKEN_PLACEHOLDER}",
+            "Session-id": SESSION_ID_PLACEHOLDER,
+            "Request-id": REQUEST_ID,
+        }
+
+        _LOGGER.info("Opening Beanbag WebSocket for session %s", SESSION_ID_PLACEHOLDER)
+        _LOGGER.debug(
+            "Beanbag WebSocket connect %s with headers=%s",
+            self._ws_url,
+            sanitized_headers,
+        )
 
         try:
             websocket = await self._session.ws_connect(
@@ -201,9 +269,18 @@ class BeanbagWebSocketClient:
                 protocols=[SUBPROTOCOL],
             )
         except ClientError as error:
-            raise BeanbagWebSocketError("Beanbag WebSocket connection failed") from error
+            _LOGGER.error(
+                "Beanbag WebSocket connection failed for %s: %s",
+                SESSION_ID_PLACEHOLDER,
+                error,
+            )
+            raise BeanbagWebSocketError(
+                "Beanbag WebSocket connection failed"
+            ) from error
 
-        _LOGGER.info("Beanbag WebSocket connected for session %s", session.session_id)
+        _LOGGER.info(
+            "Beanbag WebSocket connected for session %s", SESSION_ID_PLACEHOLDER
+        )
         return websocket
 
     @staticmethod
@@ -227,11 +304,18 @@ class BeanbagBackend:
     async def login(self, email: str, password_digest: str) -> BeanbagSession:
         """Authenticate with the Beanbag REST API."""
 
+        _LOGGER.info("BeanbagBackend login invoked for %s", EMAIL_PLACEHOLDER)
         return await self._http.login(email, password_digest)
 
-    async def connect_websocket(self, session: BeanbagSession) -> ClientWebSocketResponse:
+    async def connect_websocket(
+        self, session: BeanbagSession
+    ) -> ClientWebSocketResponse:
         """Connect to the Beanbag WebSocket using the login session."""
 
+        _LOGGER.info(
+            "BeanbagBackend connect_websocket invoked for session %s",
+            SESSION_ID_PLACEHOLDER,
+        )
         return await self._ws.connect(session)
 
     async def login_and_connect(
@@ -239,8 +323,10 @@ class BeanbagBackend:
     ) -> tuple[BeanbagSession, ClientWebSocketResponse]:
         """Run the login flow and immediately open the WebSocket."""
 
+        _LOGGER.info("Starting combined Beanbag login and WebSocket handshake")
         session = await self.login(email, password_digest)
         websocket = await self.connect_websocket(session)
+        _LOGGER.info("Completed Beanbag login and WebSocket handshake")
         return session, websocket
 
 
