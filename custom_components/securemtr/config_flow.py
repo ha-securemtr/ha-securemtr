@@ -25,7 +25,7 @@ STEP_USER_DATA_SCHEMA = vol.Schema(
 
 
 class SecuremtrConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
-    """Handle securemtr configuration flows."""
+    """Handle SecureMTR configuration flows."""
 
     VERSION = 1
 
@@ -33,7 +33,7 @@ class SecuremtrConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         self, user_input: dict[str, Any] | None = None
     ) -> FlowResult:
         """Handle the initial user configuration step."""
-        _LOGGER.info("Starting securemtr user configuration step")
+        _LOGGER.info("Starting SecureMTR user configuration step")
 
         if user_input is not None:
             email = user_input[CONF_EMAIL].strip()
@@ -57,14 +57,17 @@ class SecuremtrConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             hashed_password = hashlib.md5(password.encode("utf-8")).hexdigest()
 
             _LOGGER.info(
-                "Secure Controls credentials accepted for %s", normalized_email
+                "Secure Controls app credentials accepted for %s",
+                normalized_email,
             )
             return self.async_create_entry(
                 title=email,
                 data={CONF_EMAIL: email, CONF_PASSWORD: hashed_password},
             )
 
-        _LOGGER.info("Displaying Secure Controls credential form to user")
+        _LOGGER.info(
+            "Displaying SecureMTR configuration form for Secure Controls credentials"
+        )
         return self.async_show_form(
             step_id="user",
             data_schema=STEP_USER_DATA_SCHEMA,
