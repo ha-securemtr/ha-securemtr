@@ -76,6 +76,7 @@ class BeanbagStateSnapshot:
 
     payload: dict[str, Any]
     primary_power_on: bool | None
+    timed_boost_enabled: bool | None
 
 
 type ProgramZone = Literal["primary", "boost"]
@@ -561,11 +562,24 @@ class BeanbagBackend:
             )
 
         primary_power = self._extract_primary_power(response)
+        timed_boost_enabled = self._extract_timed_boost_flag(response)
         _LOGGER.debug(
             "Beanbag live state reports primary power %s",
             "on" if primary_power else "off" if primary_power is False else "unknown",
         )
-        return BeanbagStateSnapshot(payload=response, primary_power_on=primary_power)
+        _LOGGER.debug(
+            "Beanbag live state reports timed boost feature %s",
+            "enabled"
+            if timed_boost_enabled
+            else "disabled"
+            if timed_boost_enabled is False
+            else "unknown",
+        )
+        return BeanbagStateSnapshot(
+            payload=response,
+            primary_power_on=primary_power,
+            timed_boost_enabled=timed_boost_enabled,
+        )
 
     async def turn_controller_on(
         self,
@@ -586,6 +600,31 @@ class BeanbagBackend:
         """Send the WebSocket command to disable the primary immersion."""
 
         await self._set_primary_mode(session, websocket, gateway_id, value=0)
+
+    async def set_timed_boost_enabled(
+        self,
+        session: BeanbagSession,
+        websocket: ClientWebSocketResponse,
+        gateway_id: str,
+        *,
+        enabled: bool,
+    ) -> None:
+        """Toggle the timed boost feature flag via the WebSocket."""
+
+        acknowledgement = await self._send_request(
+            session,
+            websocket,
+            gateway_id,
+            header_hi=2,
+            header_si=16,
+            args=[2, {"I": 27, "V": 1 if enabled else 0}],
+        )
+
+        if acknowledgement not in (0, "0", None):
+            raise BeanbagWebSocketError(
+                "Unexpected Beanbag timed boost toggle acknowledgement: "
+                f"{acknowledgement}"
+            )
 
     async def read_weekly_program(
         self,
@@ -692,6 +731,38 @@ class BeanbagBackend:
 
                 value = item.get("V")
                 if value == 2:
+                    return True
+                if value == 0:
+                    return False
+
+        return None
+
+    @staticmethod
+    def _extract_timed_boost_flag(state_payload: dict[str, Any]) -> bool | None:
+        """Return the timed boost enable flag from a live state payload."""
+
+        blocks = state_payload.get("V")
+        if not isinstance(blocks, list):
+            return None
+
+        for block in blocks:
+            if not isinstance(block, dict):
+                continue
+            if block.get("SI") != 16:
+                continue
+
+            items = block.get("V")
+            if not isinstance(items, list):
+                continue
+
+            for item in items:
+                if not isinstance(item, dict):
+                    continue
+                if item.get("I") != 27:
+                    continue
+
+                value = item.get("V")
+                if value == 1:
                     return True
                 if value == 0:
                     return False

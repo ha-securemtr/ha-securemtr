@@ -145,10 +145,14 @@ class FakeBeanbagBackend:
         payload = {
             "V": [
                 {"I": 1, "SI": 33, "V": [{"I": 6, "V": 2}]},
-                {"I": 2, "SI": 16, "V": []},
+                {"I": 2, "SI": 16, "V": [{"I": 27, "V": 0}]},
             ]
         }
-        return BeanbagStateSnapshot(payload=payload, primary_power_on=True)
+        return BeanbagStateSnapshot(
+            payload=payload,
+            primary_power_on=True,
+            timed_boost_enabled=False,
+        )
 
     async def turn_controller_on(
         self, session: BeanbagSession, websocket: FakeWebSocket, gateway_id: str
@@ -265,7 +269,9 @@ async def test_async_setup_entry_starts_backend(
     assert runtime.device_configuration == {"V": []}
     assert runtime.state_snapshot is not None
     assert runtime.state_snapshot.primary_power_on is True
+    assert runtime.state_snapshot.timed_boost_enabled is False
     assert runtime.primary_power_on is True
+    assert runtime.timed_boost_enabled is False
     assert hass.config_entries.forwarded == [("switch",)]
 
 

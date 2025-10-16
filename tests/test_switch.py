@@ -17,9 +17,11 @@ from custom_components.securemtr import (
 from custom_components.securemtr.beanbag import BeanbagError
 from custom_components.securemtr.switch import (
     SecuremtrPowerSwitch,
+    SecuremtrTimedBoostSwitch,
     _slugify_identifier,
     async_setup_entry,
 )
+from homeassistant.components.switch import SwitchEntity
 from homeassistant.exceptions import HomeAssistantError
 
 
@@ -36,6 +38,7 @@ class DummyBackend:
     def __init__(self) -> None:
         self.on_calls: list[tuple[Any, Any, str]] = []
         self.off_calls: list[tuple[Any, Any, str]] = []
+        self.timed_boost_calls: list[tuple[Any, Any, str, bool]] = []
 
     async def turn_controller_on(
         self, session: Any, websocket: Any, gateway_id: str
@@ -50,6 +53,18 @@ class DummyBackend:
         """Record an off command."""
 
         self.off_calls.append((session, websocket, gateway_id))
+
+    async def set_timed_boost_enabled(
+        self,
+        session: Any,
+        websocket: Any,
+        gateway_id: str,
+        *,
+        enabled: bool,
+    ) -> None:
+        """Record a timed boost toggle command."""
+
+        self.timed_boost_calls.append((session, websocket, gateway_id, enabled))
 
     async def read_device_metadata(
         self, *args: Any, **kwargs: Any
@@ -73,6 +88,7 @@ def _create_runtime() -> tuple[SecuremtrRuntimeData, DummyBackend]:
         model="E7+",
     )
     runtime.primary_power_on = False
+    runtime.timed_boost_enabled = False
     runtime.controller_ready.set()
     return runtime, backend
 
@@ -84,49 +100,91 @@ async def test_switch_setup_creates_entity() -> None:
     runtime, backend = _create_runtime()
     hass = SimpleNamespace(data={DOMAIN: {"entry": runtime}})
     entry = DummyEntry(entry_id="entry")
-    entities: list[SecuremtrPowerSwitch] = []
+    entities: list[SwitchEntity] = []
 
-    def _add_entities(new_entities: list[SecuremtrPowerSwitch]) -> None:
+    def _add_entities(new_entities: list[SwitchEntity]) -> None:
         entities.extend(new_entities)
 
     await async_setup_entry(hass, entry, _add_entities)
 
-    assert len(entities) == 1
-    switch = entities[0]
-    assert switch.available
-    assert switch.unique_id == "serial_1_primary_power"
-    assert switch.device_info["identifiers"] == {(DOMAIN, "serial-1")}
-    assert (
-        switch.device_info["name"]
-        == "E7+ Water Heater (SN: serial-1)"
-    )
-    assert switch.device_info["model"] == "E7+"
-    assert switch.name == "E7+ Controller"
-    assert switch.is_on is False
+    assert {entity.unique_id for entity in entities} == {
+        "serial_1_primary_power",
+        "serial_1_timed_boost",
+    }
 
-    switch.hass = SimpleNamespace()
-    switch.entity_id = "switch.securemtr_controller"
+    power_switch = next(
+        entity for entity in entities if entity.unique_id.endswith("primary_power")
+    )
+    timed_switch = next(
+        entity for entity in entities if entity.unique_id.endswith("timed_boost")
+    )
+
+    assert isinstance(power_switch, SecuremtrPowerSwitch)
+    assert isinstance(timed_switch, SecuremtrTimedBoostSwitch)
+    assert power_switch.available
+    assert timed_switch.available
+    assert power_switch.device_info["identifiers"] == {(DOMAIN, "serial-1")}
+    assert timed_switch.device_info["name"] == "E7+ Water Heater (SN: serial-1)"
+    assert timed_switch.device_info["model"] == "E7+"
+    assert power_switch.name == "E7+ Controller"
+    assert timed_switch.name == "Timed Boost"
+    assert power_switch.is_on is False
+    assert timed_switch.is_on is False
+
+    power_switch.hass = SimpleNamespace()
+    power_switch.entity_id = "switch.securemtr_controller"
     state_writes: list[str] = []
 
     def _record_state_write() -> None:
         state_writes.append("write")
 
-    switch.async_write_ha_state = _record_state_write  # type: ignore[assignment]
+    power_switch.async_write_ha_state = _record_state_write  # type: ignore[assignment]
 
-    await switch.async_turn_on()
+    await power_switch.async_turn_on()
     assert backend.on_calls == [(runtime.session, runtime.websocket, "gateway-1")]
     assert runtime.primary_power_on is True
-    assert switch.is_on is True
+    assert power_switch.is_on is True
     assert state_writes == ["write"]
 
-    switch.hass = None
+    power_switch.hass = None
     state_writes.clear()
 
-    await switch.async_turn_off()
+    await power_switch.async_turn_off()
     assert backend.off_calls == [(runtime.session, runtime.websocket, "gateway-1")]
     assert runtime.primary_power_on is False
-    assert switch.is_on is False
+    assert power_switch.is_on is False
     assert state_writes == []
+
+    timed_switch.hass = SimpleNamespace()
+    timed_switch.entity_id = "switch.securemtr_timed_boost"
+    timed_state_writes: list[str] = []
+
+    def _record_timed_state_write() -> None:
+        timed_state_writes.append("write")
+
+    timed_switch.async_write_ha_state = _record_timed_state_write  # type: ignore[assignment]
+
+    await timed_switch.async_turn_on()
+    assert backend.timed_boost_calls == [
+        (runtime.session, runtime.websocket, "gateway-1", True)
+    ]
+    assert runtime.timed_boost_enabled is True
+    assert timed_switch.is_on is True
+    assert timed_state_writes == ["write"]
+
+    timed_switch.hass = None
+    timed_state_writes.clear()
+
+    await timed_switch.async_turn_off()
+    assert backend.timed_boost_calls[-1] == (
+        runtime.session,
+        runtime.websocket,
+        "gateway-1",
+        False,
+    )
+    assert runtime.timed_boost_enabled is False
+    assert timed_switch.is_on is False
+    assert timed_state_writes == []
 
 
 def test_switch_device_info_without_serial() -> None:
@@ -186,15 +244,65 @@ async def test_switch_turn_on_requires_connection() -> None:
     runtime.session = None
     hass = SimpleNamespace(data={DOMAIN: {"entry": runtime}})
     entry = DummyEntry(entry_id="entry")
-    entities: list[SecuremtrPowerSwitch] = []
+    entities: list[SwitchEntity] = []
 
     await async_setup_entry(hass, entry, entities.extend)
 
-    switch = entities[0]
+    power_switch = next(
+        entity for entity in entities if entity.unique_id.endswith("primary_power")
+    )
     with pytest.raises(HomeAssistantError):
-        await switch.async_turn_on()
+        await power_switch.async_turn_on()
 
     assert backend.on_calls == []
+
+
+@pytest.mark.asyncio
+async def test_timed_boost_requires_connection() -> None:
+    """Ensure the timed boost switch raises when the runtime lacks a connection."""
+
+    runtime, backend = _create_runtime()
+    runtime.session = None
+    hass = SimpleNamespace(data={DOMAIN: {"entry": runtime}})
+    entry = DummyEntry(entry_id="entry")
+    entities: list[SwitchEntity] = []
+
+    await async_setup_entry(hass, entry, entities.extend)
+
+    timed_switch = next(
+        entity for entity in entities if entity.unique_id.endswith("timed_boost")
+    )
+
+    with pytest.raises(HomeAssistantError):
+        await timed_switch.async_turn_on()
+
+    assert backend.timed_boost_calls == []
+
+
+@pytest.mark.asyncio
+async def test_timed_boost_backend_error(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Convert backend failures into Home Assistant errors for timed boost."""
+
+    runtime, backend = _create_runtime()
+    hass = SimpleNamespace(data={DOMAIN: {"entry": runtime}})
+    entry = DummyEntry(entry_id="entry")
+    entities: list[SwitchEntity] = []
+
+    await async_setup_entry(hass, entry, entities.extend)
+
+    timed_switch = next(
+        entity for entity in entities if entity.unique_id.endswith("timed_boost")
+    )
+
+    async def _raise(*args: Any, **kwargs: Any) -> None:
+        raise BeanbagError("fail")
+
+    monkeypatch.setattr(backend, "set_timed_boost_enabled", _raise)
+
+    with pytest.raises(HomeAssistantError):
+        await timed_switch.async_turn_on()
+
+    assert runtime.timed_boost_enabled is False
 
 
 @pytest.mark.asyncio

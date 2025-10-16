@@ -42,25 +42,26 @@ async def async_setup_entry(
     if controller is None:
         raise HomeAssistantError("Secure Meters controller metadata was not available")
 
-    async_add_entities([SecuremtrPowerSwitch(runtime, controller)])
+    async_add_entities(
+        [
+            SecuremtrPowerSwitch(runtime, controller),
+            SecuremtrTimedBoostSwitch(runtime, controller),
+        ]
+    )
 
 
-class SecuremtrPowerSwitch(SwitchEntity):
-    """Represent a maintained power toggle for the Secure Meters controller."""
+class _SecuremtrBaseSwitch(SwitchEntity):
+    """Provide shared behaviour for Secure Meters switch entities."""
 
     _attr_should_poll = False
 
     def __init__(
         self, runtime: SecuremtrRuntimeData, controller: SecuremtrController
     ) -> None:
-        """Initialise the switch entity with runtime context."""
+        """Initialise the switch with runtime context and controller metadata."""
 
         self._runtime = runtime
         self._controller = controller
-        serial_identifier = controller.serial_number or controller.identifier
-        identifier_slug = _slugify_identifier(serial_identifier)
-        self._attr_unique_id = f"{identifier_slug}_primary_power"
-        self._attr_name = "E7+ Controller"
 
     @property
     def available(self) -> bool:
@@ -74,24 +75,27 @@ class SecuremtrPowerSwitch(SwitchEntity):
     def device_info(self) -> DeviceInfo:
         """Return device registry information for the controller."""
 
+        return _build_device_info(self._controller)
+
+    def _identifier_slug(self) -> str:
+        """Return the slugified identifier for the controller."""
+
         controller = self._controller
         serial_identifier = controller.serial_number or controller.identifier
-        serial_display = controller.serial_number
-        if not serial_display:
-            serial_display = serial_identifier
-        device_name = (
-            f"E7+ Water Heater (SN: {serial_display})"
-            if controller.serial_number
-            else f"E7+ Water Heater ({serial_display})"
-        )
-        return DeviceInfo(
-            identifiers={(DOMAIN, serial_identifier)},
-            manufacturer="Secure Meters",
-            model=controller.model or "E7+",
-            name=device_name,
-            sw_version=controller.firmware_version,
-            serial_number=controller.serial_number,
-        )
+        return _slugify_identifier(serial_identifier)
+
+
+class SecuremtrPowerSwitch(_SecuremtrBaseSwitch):
+    """Represent a maintained power toggle for the Secure Meters controller."""
+
+    def __init__(
+        self, runtime: SecuremtrRuntimeData, controller: SecuremtrController
+    ) -> None:
+        """Initialise the switch entity with runtime context."""
+
+        super().__init__(runtime, controller)
+        self._attr_unique_id = f"{self._identifier_slug()}_primary_power"
+        self._attr_name = "E7+ Controller"
 
     @property
     def is_on(self) -> bool:
@@ -149,10 +153,94 @@ class SecuremtrPowerSwitch(SwitchEntity):
         self.async_write_ha_state()
 
 
+class SecuremtrTimedBoostSwitch(_SecuremtrBaseSwitch):
+    """Expose the timed boost feature toggle reported by Beanbag."""
+
+    def __init__(
+        self, runtime: SecuremtrRuntimeData, controller: SecuremtrController
+    ) -> None:
+        """Initialise the timed boost switch for the controller."""
+
+        super().__init__(runtime, controller)
+        self._attr_unique_id = f"{self._identifier_slug()}_timed_boost"
+        self._attr_name = "Timed Boost"
+
+    @property
+    def is_on(self) -> bool:
+        """Return whether timed boost is currently enabled."""
+
+        return self._runtime.timed_boost_enabled is True
+
+    async def async_turn_on(self, **kwargs: object) -> None:
+        """Enable the timed boost feature in the backend."""
+
+        await self._async_set_timed_boost(True)
+
+    async def async_turn_off(self, **kwargs: object) -> None:
+        """Disable the timed boost feature in the backend."""
+
+        await self._async_set_timed_boost(False)
+
+    async def _async_set_timed_boost(self, enabled: bool) -> None:
+        """Drive the backend to the requested timed boost state."""
+
+        runtime = self._runtime
+        controller = runtime.controller
+        session = runtime.session
+        websocket = runtime.websocket
+
+        if controller is None or session is None or websocket is None:
+            raise HomeAssistantError("Secure Meters controller is not connected")
+
+        async with runtime.command_lock:
+            try:
+                await runtime.backend.set_timed_boost_enabled(
+                    session,
+                    websocket,
+                    controller.gateway_id,
+                    enabled=enabled,
+                )
+            except BeanbagError as error:
+                _LOGGER.error(
+                    "Failed to toggle Secure Meters timed boost feature: %s", error
+                )
+                raise HomeAssistantError(
+                    "Failed to toggle Secure Meters timed boost feature"
+                ) from error
+
+            runtime.timed_boost_enabled = enabled
+
+        hass = self.hass
+        if hass is None:
+            return
+
+        self.async_write_ha_state()
+
+
 def _slugify_identifier(identifier: str) -> str:
     """Convert the controller identifier into a slug suitable for unique IDs."""
 
     return (
         "".join(ch.lower() if ch.isalnum() else "_" for ch in identifier).strip("_")
         or DOMAIN
+    )
+
+
+def _build_device_info(controller: SecuremtrController) -> DeviceInfo:
+    """Construct device registry metadata for the provided controller."""
+
+    serial_identifier = controller.serial_number or controller.identifier
+    serial_display = controller.serial_number or serial_identifier
+    device_name = (
+        f"E7+ Water Heater (SN: {serial_display})"
+        if controller.serial_number
+        else f"E7+ Water Heater ({serial_display})"
+    )
+    return DeviceInfo(
+        identifiers={(DOMAIN, serial_identifier)},
+        manufacturer="Secure Meters",
+        model=controller.model or "E7+",
+        name=device_name,
+        sw_version=controller.firmware_version,
+        serial_number=controller.serial_number,
     )
