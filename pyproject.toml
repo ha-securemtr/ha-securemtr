@@ -7,9 +7,6 @@ authors = [{ name = "ha-securemtr" }]
 requires-python = ">=3.13.2"
 dependencies = [
     "homeassistant>=2025.1.0",
-    "aiohttp>=3.12.0",
-    "python-socketio==5.14.2",
-    "voluptuous>=0.13",
 ]
 
 [project.optional-dependencies]
