@@ -18,5 +18,6 @@
 ## Add the SecureMTR integration
 
 - Provide the same username (email address) and password that you use with the Secure Controls mobile app when setting up the SecureMTR integration.
+- Accidental spaces before or after your email address are trimmed during login so credentials match what the Secure Controls app expects.
 
 *_Disclaimer: This repository is not in any way affiliated with Secure Meters (UK), the Secure Controls system, Home Assistant or other referenced entities. This is an open community project to allow customers to use their electric water heater controllers with their own authorized credentials. Use at your own risk._*
