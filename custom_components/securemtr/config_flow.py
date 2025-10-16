@@ -56,12 +56,9 @@ class SecuremtrConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
 
             hashed_password = hashlib.md5(password.encode("utf-8")).hexdigest()
 
-            _LOGGER.info(
-                "Secure Controls app credentials accepted for %s",
-                normalized_email,
-            )
+            _LOGGER.info("Secure Controls app credentials accepted")
             return self.async_create_entry(
-                title=email,
+                title="SecureMTR",
                 data={CONF_EMAIL: email, CONF_PASSWORD: hashed_password},
             )
 

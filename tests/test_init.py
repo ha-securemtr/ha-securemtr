@@ -5,12 +5,14 @@ from __future__ import annotations
 import asyncio
 from dataclasses import dataclass
 from typing import Any, Awaitable
+from types import SimpleNamespace
 
 import pytest
 
 from custom_components.securemtr import (
     DOMAIN,
     SecuremtrRuntimeData,
+    _entry_display_name,
     async_setup_entry,
     async_unload_entry,
 )
@@ -24,6 +26,7 @@ class DummyConfigEntry:
     entry_id: str
     data: dict[str, str]
     unique_id: str | None = None
+    title: str | None = None
 
 
 class FakeWebSocket:
@@ -95,6 +98,7 @@ async def test_async_setup_entry_starts_backend(monkeypatch: pytest.MonkeyPatch)
         entry_id="1",
         unique_id="user@example.com",
         data={"email": "user@example.com", "password": "digest"},
+        title="SecureMTR",
     )
 
     fake_session = object()
@@ -130,6 +134,7 @@ async def test_async_setup_entry_handles_backend_error(
         entry_id="2",
         unique_id="user2@example.com",
         data={"email": "user2@example.com", "password": "digest"},
+        title="SecureMTR",
     )
 
     class FailingBackend(FakeBeanbagBackend):
@@ -165,6 +170,7 @@ async def test_async_unload_entry_cleans_up(monkeypatch: pytest.MonkeyPatch) -> 
         entry_id="3",
         unique_id="user3@example.com",
         data={"email": "user3@example.com", "password": "digest"},
+        title="SecureMTR",
     )
 
     fake_session = object()
@@ -232,3 +238,17 @@ async def test_async_unload_entry_without_runtime() -> None:
     entry = DummyConfigEntry(entry_id="missing", unique_id=None, data={})
 
     assert await async_unload_entry(hass, entry)
+
+
+def test_entry_display_name_prefers_title() -> None:
+    """Ensure the helper surfaces a provided title."""
+
+    entry = SimpleNamespace(title="SecureMTR", entry_id="entry-id")
+    assert _entry_display_name(entry) == "SecureMTR"
+
+
+def test_entry_display_name_falls_back_to_domain() -> None:
+    """Ensure the helper provides a generic fallback when metadata is absent."""
+
+    entry = SimpleNamespace()
+    assert _entry_display_name(entry) == DOMAIN

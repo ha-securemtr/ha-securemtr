@@ -31,6 +31,20 @@ class SecuremtrRuntimeData:
     startup_task: asyncio.Task[Any] | None = None
 
 
+def _entry_display_name(entry: ConfigEntry) -> str:
+    """Return a non-sensitive identifier for a config entry."""
+
+    title = getattr(entry, "title", None)
+    if isinstance(title, str) and title.strip():
+        return title
+
+    entry_id = getattr(entry, "entry_id", None)
+    if isinstance(entry_id, str) and entry_id.strip():
+        return entry_id
+
+    return DOMAIN
+
+
 async def async_setup(hass: HomeAssistant, config: dict[str, Any]) -> bool:
     """Set up the securemtr integration."""
     _LOGGER.info("Starting securemtr integration setup")
@@ -41,7 +55,7 @@ async def async_setup(hass: HomeAssistant, config: dict[str, Any]) -> bool:
 
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     """Set up securemtr from a config entry."""
-    entry_identifier = entry.unique_id or entry.entry_id
+    entry_identifier = _entry_display_name(entry)
     _LOGGER.info("Setting up config entry for securemtr: %s", entry_identifier)
 
     hass.data.setdefault(DOMAIN, {})
@@ -60,7 +74,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
 async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     """Unload a securemtr config entry."""
-    entry_identifier = entry.unique_id or entry.entry_id
+    entry_identifier = _entry_display_name(entry)
     _LOGGER.info("Unloading securemtr config entry: %s", entry_identifier)
 
     hass.data.setdefault(DOMAIN, {})
@@ -87,24 +101,27 @@ async def _async_start_backend(entry: ConfigEntry, runtime: SecuremtrRuntimeData
 
     email: str = entry.data.get(CONF_EMAIL, "").strip()
     password_digest: str = entry.data.get(CONF_PASSWORD, "")
+    entry_identifier = _entry_display_name(entry)
 
     if not email or not password_digest:
         _LOGGER.error(
-            "Missing credentials for securemtr entry %s", entry.unique_id or entry.entry_id
+            "Missing credentials for securemtr entry %s", entry_identifier
         )
         return
 
-    _LOGGER.info("Starting Beanbag backend for %s", email)
+    _LOGGER.info("Starting Beanbag backend for %s", entry_identifier)
 
     try:
         session, websocket = await runtime.backend.login_and_connect(
             email, password_digest
         )
     except BeanbagError as error:
-        _LOGGER.error("Failed to initialize Beanbag backend for %s: %s", email, error)
+        _LOGGER.error(
+            "Failed to initialize Beanbag backend for %s: %s", entry_identifier, error
+        )
         return
 
     runtime.session = session
     runtime.websocket = websocket
 
-    _LOGGER.info("Beanbag backend connected for %s", email)
+    _LOGGER.info("Beanbag backend connected for %s", entry_identifier)

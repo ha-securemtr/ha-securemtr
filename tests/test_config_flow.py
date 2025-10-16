@@ -175,7 +175,7 @@ async def test_config_flow_creates_entry(hass_fixture: HomeAssistant) -> None:
     expected_hash = hashlib.md5("secret".encode("utf-8")).hexdigest()
 
     assert result["type"] == FlowResultType.CREATE_ENTRY
-    assert result["title"] == "User@Example.com"
+    assert result["title"] == "SecureMTR"
     assert result["data"] == {
         CONF_EMAIL: "User@Example.com",
         CONF_PASSWORD: expected_hash,
