@@ -256,9 +256,9 @@ def _build_controller(
     """Translate metadata and gateway context into a controller object."""
 
     identifier_candidates = (
-        str(metadata.get("BOI", "")).strip(),
-        str(metadata.get("SN", "")).strip(),
-        str(gateway.gateway_id or "").strip(),
+        _normalize_identifier(metadata.get("BOI")),
+        _normalize_identifier(metadata.get("SN")),
+        _normalize_identifier(gateway.gateway_id),
     )
 
     identifier = next(
@@ -315,3 +315,17 @@ def _build_controller(
         firmware_version=firmware_version,
         model=model,
     )
+
+
+def _normalize_identifier(value: Any) -> str | None:
+    """Return a sanitized identifier candidate when possible."""
+
+    if isinstance(value, bool):
+        return None
+
+    if isinstance(value, (str, int, float)):
+        candidate = str(value).strip()
+        if candidate and candidate.lower() != "none":
+            return candidate
+
+    return None
