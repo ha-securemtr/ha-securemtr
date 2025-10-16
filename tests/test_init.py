@@ -189,10 +189,10 @@ async def test_async_setup_entry_starts_backend(
     assert runtime.session is backend._session
     assert runtime.websocket is backend.websocket
     assert runtime.controller is not None
-    assert runtime.controller.identifier == "controller-1"
+    assert runtime.controller.identifier == "serial-1"
     assert backend.login_calls == [("user@example.com", "digest")]
     assert backend.metadata_calls[0] == "gateway-1"
-    assert hass.config_entries.forwarded == [("button",)]
+    assert hass.config_entries.forwarded == [("switch",)]
 
 
 @pytest.mark.asyncio
@@ -394,7 +394,7 @@ async def test_async_unload_entry_cleans_up(monkeypatch: pytest.MonkeyPatch) -> 
     assert backend.websocket.close_calls == 1
     await asyncio.sleep(0)
     assert runtime.startup_task.cancelled()
-    assert hass.config_entries.unloaded == [("button",)]
+    assert hass.config_entries.unloaded == [("switch",)]
 
 
 @pytest.mark.asyncio
@@ -538,6 +538,29 @@ def test_build_controller_normalises_metadata() -> None:
     assert controller.serial_number is None
     assert controller.firmware_version == "2"
     assert controller.model == "E7+"
+
+
+def test_build_controller_prefers_serial_number() -> None:
+    """Ensure the serial number is used when metadata supplies one."""
+
+    metadata = {
+        "BOI": "2",
+        "SN": "serial-1",
+        "N": "Controller",
+        "FV": "1.0.0",
+        "MD": "E7+",
+    }
+    gateway = BeanbagGateway(
+        gateway_id="gateway-1",
+        serial_number="gateway-serial",
+        host_name="host",
+        capabilities={},
+    )
+
+    controller = _build_controller(metadata, gateway)
+
+    assert controller.identifier == "serial-1"
+    assert controller.serial_number == "serial-1"
 
 
 def test_entry_display_name_prefers_title() -> None:

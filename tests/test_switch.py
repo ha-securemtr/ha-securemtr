@@ -1,4 +1,4 @@
-"""Tests for the securemtr button platform."""
+"""Tests for the securemtr switch platform."""
 
 from __future__ import annotations
 
@@ -15,8 +15,8 @@ from custom_components.securemtr import (
     SecuremtrRuntimeData,
 )
 from custom_components.securemtr.beanbag import BeanbagError
-from custom_components.securemtr.button import (
-    SecuremtrPowerButton,
+from custom_components.securemtr.switch import (
+    SecuremtrPowerSwitch,
     _slugify_identifier,
     async_setup_entry,
 )
@@ -31,7 +31,7 @@ class DummyEntry:
 
 
 class DummyBackend:
-    """Capture power commands issued by the button entity."""
+    """Capture power commands issued by the switch entity."""
 
     def __init__(self) -> None:
         self.on_calls: list[tuple[Any, Any, str]] = []
@@ -65,7 +65,7 @@ def _create_runtime() -> tuple[SecuremtrRuntimeData, DummyBackend]:
     runtime.session = SimpleNamespace()
     runtime.websocket = SimpleNamespace()
     runtime.controller = SecuremtrController(
-        identifier="controller-1",
+        identifier="serial-1",
         name="E7+ Controller",
         gateway_id="gateway-1",
         serial_number="serial-1",
@@ -78,36 +78,54 @@ def _create_runtime() -> tuple[SecuremtrRuntimeData, DummyBackend]:
 
 
 @pytest.mark.asyncio
-async def test_button_setup_creates_entity() -> None:
-    """Ensure the button platform exposes the controller toggle button."""
+async def test_switch_setup_creates_entity() -> None:
+    """Ensure the switch platform exposes the controller power switch."""
 
     runtime, backend = _create_runtime()
     hass = SimpleNamespace(data={DOMAIN: {"entry": runtime}})
     entry = DummyEntry(entry_id="entry")
-    entities: list[SecuremtrPowerButton] = []
+    entities: list[SecuremtrPowerSwitch] = []
 
-    def _add_entities(new_entities: list[SecuremtrPowerButton]) -> None:
+    def _add_entities(new_entities: list[SecuremtrPowerSwitch]) -> None:
         entities.extend(new_entities)
 
     await async_setup_entry(hass, entry, _add_entities)
 
     assert len(entities) == 1
-    button = entities[0]
-    assert button.available
-    assert button.unique_id == "controller_1_primary_power"
-    assert button.device_info["identifiers"] == {(DOMAIN, "controller-1")}
+    switch = entities[0]
+    assert switch.available
+    assert switch.unique_id == "serial_1_primary_power"
+    assert switch.device_info["identifiers"] == {(DOMAIN, "serial-1")}
+    assert switch.name == "E7+ Controller serial-1 Water Heater"
+    assert switch.is_on is False
 
-    await button.async_press()
+    switch.hass = SimpleNamespace()
+    switch.entity_id = "switch.securemtr_controller"
+    state_writes: list[str] = []
+
+    def _record_state_write() -> None:
+        state_writes.append("write")
+
+    switch.async_write_ha_state = _record_state_write  # type: ignore[assignment]
+
+    await switch.async_turn_on()
     assert backend.on_calls == [(runtime.session, runtime.websocket, "gateway-1")]
     assert runtime.primary_power_on is True
+    assert switch.is_on is True
+    assert state_writes == ["write"]
 
-    await button.async_press()
+    switch.hass = None
+    state_writes.clear()
+
+    await switch.async_turn_off()
     assert backend.off_calls == [(runtime.session, runtime.websocket, "gateway-1")]
     assert runtime.primary_power_on is False
+    assert switch.is_on is False
+    assert state_writes == []
 
 
 @pytest.mark.asyncio
-async def test_button_setup_times_out(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_switch_setup_times_out(monkeypatch: pytest.MonkeyPatch) -> None:
     """Verify the platform raises when metadata is not ready in time."""
 
     runtime, _backend = _create_runtime()
@@ -116,7 +134,7 @@ async def test_button_setup_times_out(monkeypatch: pytest.MonkeyPatch) -> None:
     entry = DummyEntry(entry_id="entry")
 
     monkeypatch.setattr(
-        "custom_components.securemtr.button._CONTROLLER_WAIT_TIMEOUT", 0.01
+        "custom_components.securemtr.switch._CONTROLLER_WAIT_TIMEOUT", 0.01
     )
 
     with pytest.raises(HomeAssistantError):
@@ -124,7 +142,7 @@ async def test_button_setup_times_out(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 @pytest.mark.asyncio
-async def test_button_setup_requires_controller() -> None:
+async def test_switch_setup_requires_controller() -> None:
     """Ensure a missing controller raises an explicit error."""
 
     runtime, _backend = _create_runtime()
@@ -137,26 +155,26 @@ async def test_button_setup_requires_controller() -> None:
 
 
 @pytest.mark.asyncio
-async def test_button_press_requires_connection() -> None:
-    """Ensure the button raises when the runtime lacks a live connection."""
+async def test_switch_turn_on_requires_connection() -> None:
+    """Ensure the switch raises when the runtime lacks a live connection."""
 
     runtime, backend = _create_runtime()
     runtime.session = None
     hass = SimpleNamespace(data={DOMAIN: {"entry": runtime}})
     entry = DummyEntry(entry_id="entry")
-    entities: list[SecuremtrPowerButton] = []
+    entities: list[SecuremtrPowerSwitch] = []
 
     await async_setup_entry(hass, entry, entities.extend)
 
-    button = entities[0]
+    switch = entities[0]
     with pytest.raises(HomeAssistantError):
-        await button.async_press()
+        await switch.async_turn_on()
 
     assert backend.on_calls == []
 
 
 @pytest.mark.asyncio
-async def test_button_press_handles_backend_error() -> None:
+async def test_switch_turn_on_handles_backend_error() -> None:
     """Verify Beanbag errors propagate as Home Assistant errors."""
 
     runtime, _backend = _create_runtime()
@@ -170,13 +188,13 @@ async def test_button_press_handles_backend_error() -> None:
     runtime.backend = ErrorBackend()  # type: ignore[assignment]
     hass = SimpleNamespace(data={DOMAIN: {"entry": runtime}})
     entry = DummyEntry(entry_id="entry")
-    entities: list[SecuremtrPowerButton] = []
+    entities: list[SecuremtrPowerSwitch] = []
 
     await async_setup_entry(hass, entry, entities.extend)
 
-    button = entities[0]
+    switch = entities[0]
     with pytest.raises(HomeAssistantError):
-        await button.async_press()
+        await switch.async_turn_on()
 
     assert runtime.primary_power_on is False
 
