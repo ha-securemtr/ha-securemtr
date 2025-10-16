@@ -252,3 +252,230 @@ async def test_backend_login_and_connect_flow() -> None:
     assert websocket is fake_ws
     assert session.post.called
     assert session.ws_connect.called
+
+
+@pytest.mark.asyncio
+async def test_backend_read_device_metadata(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Ensure metadata requests are sent with the documented headers."""
+
+    session_data = BeanbagSession(
+        user_id=1,
+        session_id="abc",
+        token="jwt",
+        token_timestamp=None,
+        gateways=(),
+    )
+    expected_correlation = "abc-00000001"
+    response_payload = {"BOI": "controller"}
+
+    class DummyWebSocket:
+        def __init__(self) -> None:
+            self.sent: list[dict[str, Any]] = []
+
+        async def send_json(self, payload: dict[str, Any]) -> None:
+            self.sent.append(payload)
+
+        async def receive_json(self) -> dict[str, Any]:
+            return {"I": expected_correlation, "R": response_payload}
+
+    websocket = DummyWebSocket()
+    backend = BeanbagBackend(Mock())
+    monkeypatch.setattr(
+        "custom_components.securemtr.beanbag.secrets.randbits", lambda bits: 1
+    )
+    monkeypatch.setattr("custom_components.securemtr.beanbag.time.time", lambda: 1000)
+
+    metadata = await backend.read_device_metadata(session_data, websocket, "gateway-1")
+
+    assert metadata == response_payload
+    assert websocket.sent
+    header = websocket.sent[0]["P"][0]
+    assert header == {"GMI": "gateway-1", "HI": 17, "SI": 11}
+    assert websocket.sent[0]["I"] == expected_correlation
+
+
+@pytest.mark.asyncio
+async def test_backend_read_device_metadata_validates_payload(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Raise an error when the metadata payload is not an object."""
+
+    session_data = BeanbagSession(
+        user_id=1,
+        session_id="abc",
+        token="jwt",
+        token_timestamp=None,
+        gateways=(),
+    )
+    expected_correlation = "abc-00000001"
+
+    class DummyWebSocket:
+        async def send_json(self, payload: dict[str, Any]) -> None:
+            return None
+
+        async def receive_json(self) -> dict[str, Any]:
+            return {"I": expected_correlation, "R": []}
+
+    backend = BeanbagBackend(Mock())
+    monkeypatch.setattr(
+        "custom_components.securemtr.beanbag.secrets.randbits", lambda bits: 1
+    )
+    monkeypatch.setattr("custom_components.securemtr.beanbag.time.time", lambda: 1000)
+
+    with pytest.raises(BeanbagWebSocketError):
+        await backend.read_device_metadata(session_data, DummyWebSocket(), "gateway-1")
+
+
+@pytest.mark.asyncio
+async def test_backend_turn_controller_commands(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Verify power commands invoke the WebSocket helper with correct payloads."""
+
+    backend = BeanbagBackend(Mock())
+    send = AsyncMock(return_value=0)
+    monkeypatch.setattr(backend, "_send_request", send)
+
+    session_data = BeanbagSession(
+        user_id=1,
+        session_id="abc",
+        token="jwt",
+        token_timestamp=None,
+        gateways=(),
+    )
+    websocket = Mock()
+
+    await backend.turn_controller_on(session_data, websocket, "gateway-1")
+    await backend.turn_controller_off(session_data, websocket, "gateway-1")
+
+    assert send.await_args_list[0].kwargs == {
+        "header_hi": 2,
+        "header_si": 15,
+        "args": [1, {"I": 6, "V": 2}],
+    }
+    assert send.await_args_list[0].args[:3] == (
+        session_data,
+        websocket,
+        "gateway-1",
+    )
+
+    assert send.await_args_list[1].kwargs == {
+        "header_hi": 2,
+        "header_si": 15,
+        "args": [1, {"I": 6, "V": 0}],
+    }
+
+
+@pytest.mark.asyncio
+async def test_backend_turn_controller_mode_write_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Raise when the mode write acknowledgement is unexpected."""
+
+    backend = BeanbagBackend(Mock())
+    send = AsyncMock(return_value=5)
+    monkeypatch.setattr(backend, "_send_request", send)
+
+    session_data = BeanbagSession(
+        user_id=1,
+        session_id="abc",
+        token="jwt",
+        token_timestamp=None,
+        gateways=(),
+    )
+
+    with pytest.raises(BeanbagWebSocketError):
+        await backend.turn_controller_on(session_data, Mock(), "gateway-1")
+
+
+@pytest.mark.asyncio
+async def test_backend_send_request_handles_informational_frames(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Ensure the request helper skips non-result frames and errors when needed."""
+
+    session_data = BeanbagSession(
+        user_id=1,
+        session_id="abc",
+        token="jwt",
+        token_timestamp=None,
+        gateways=(),
+    )
+    expected_correlation = "abc-00000001"
+
+    class DummyWebSocket:
+        def __init__(self) -> None:
+            self.sent: list[dict[str, Any]] = []
+            self._responses = [
+                ["not-a-dict"],
+                {"I": "other", "R": 0},
+                {"I": expected_correlation, "M": "Notify"},
+                {"I": expected_correlation},
+            ]
+
+        async def send_json(self, payload: dict[str, Any]) -> None:
+            self.sent.append(payload)
+
+        async def receive_json(self) -> Any:
+            return self._responses.pop(0)
+
+    websocket = DummyWebSocket()
+    backend = BeanbagBackend(Mock())
+    monkeypatch.setattr(
+        "custom_components.securemtr.beanbag.secrets.randbits", lambda bits: 1
+    )
+    monkeypatch.setattr("custom_components.securemtr.beanbag.time.time", lambda: 1000)
+
+    with pytest.raises(BeanbagWebSocketError):
+        await backend._send_request(  # type: ignore[attr-defined]
+            session_data,
+            websocket,  # type: ignore[arg-type]
+            "gateway-1",
+            header_hi=1,
+            header_si=2,
+        )
+
+    assert websocket.sent
+
+
+@pytest.mark.asyncio
+async def test_backend_send_request_with_args(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Ensure argument lists are included in the transmitted payload."""
+
+    session_data = BeanbagSession(
+        user_id=1,
+        session_id="abc",
+        token="jwt",
+        token_timestamp=None,
+        gateways=(),
+    )
+    expected_correlation = "abc-00000001"
+
+    class DummyWebSocket:
+        def __init__(self) -> None:
+            self.sent: list[dict[str, Any]] = []
+
+        async def send_json(self, payload: dict[str, Any]) -> None:
+            self.sent.append(payload)
+
+        async def receive_json(self) -> dict[str, Any]:
+            return {"I": expected_correlation, "R": 0}
+
+    websocket = DummyWebSocket()
+    backend = BeanbagBackend(Mock())
+    monkeypatch.setattr(
+        "custom_components.securemtr.beanbag.secrets.randbits", lambda bits: 1
+    )
+    monkeypatch.setattr("custom_components.securemtr.beanbag.time.time", lambda: 1000)
+
+    result = await backend._send_request(  # type: ignore[attr-defined]
+        session_data,
+        websocket,  # type: ignore[arg-type]
+        "gateway-1",
+        header_hi=2,
+        header_si=15,
+        args=[1, {"I": 6, "V": 2}],
+    )
+
+    assert result == 0
+    assert websocket.sent[0]["P"][1] == [1, {"I": 6, "V": 2}]

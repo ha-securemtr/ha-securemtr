@@ -5,6 +5,8 @@ from __future__ import annotations
 from collections.abc import Iterable
 from dataclasses import dataclass
 import logging
+import secrets
+import time
 from typing import Any
 
 from aiohttp import (
@@ -328,6 +330,144 @@ class BeanbagBackend:
         websocket = await self.connect_websocket(session)
         _LOGGER.info("Completed Beanbag login and WebSocket handshake")
         return session, websocket
+
+    async def read_device_metadata(
+        self,
+        session: BeanbagSession,
+        websocket: ClientWebSocketResponse,
+        gateway_id: str,
+    ) -> dict[str, Any]:
+        """Fetch the controller metadata block via the WebSocket."""
+
+        response = await self._send_request(
+            session,
+            websocket,
+            gateway_id,
+            header_hi=17,
+            header_si=11,
+        )
+
+        if not isinstance(response, dict):
+            raise BeanbagWebSocketError(
+                "Beanbag metadata payload did not contain an object"
+            )
+
+        _LOGGER.debug(
+            "Received Beanbag metadata payload keys: %s",
+            sorted(response),
+        )
+        return response
+
+    async def turn_controller_on(
+        self,
+        session: BeanbagSession,
+        websocket: ClientWebSocketResponse,
+        gateway_id: str,
+    ) -> None:
+        """Send the WebSocket command to enable the primary immersion."""
+
+        await self._set_primary_mode(session, websocket, gateway_id, value=2)
+
+    async def turn_controller_off(
+        self,
+        session: BeanbagSession,
+        websocket: ClientWebSocketResponse,
+        gateway_id: str,
+    ) -> None:
+        """Send the WebSocket command to disable the primary immersion."""
+
+        await self._set_primary_mode(session, websocket, gateway_id, value=0)
+
+    async def _set_primary_mode(
+        self,
+        session: BeanbagSession,
+        websocket: ClientWebSocketResponse,
+        gateway_id: str,
+        *,
+        value: int,
+    ) -> None:
+        """Issue the documented primary mode write command."""
+
+        response = await self._send_request(
+            session,
+            websocket,
+            gateway_id,
+            header_hi=2,
+            header_si=15,
+            args=[1, {"I": 6, "V": value}],
+        )
+
+        if response not in (0, "0", None):
+            raise BeanbagWebSocketError(
+                f"Unexpected Beanbag mode write acknowledgement: {response}"
+            )
+
+    async def _send_request(
+        self,
+        session: BeanbagSession,
+        websocket: ClientWebSocketResponse,
+        gateway_id: str,
+        *,
+        header_hi: int,
+        header_si: int,
+        args: list[Any] | None = None,
+    ) -> Any:
+        """Send a request frame and await the matching response payload."""
+
+        correlation_id = f"{session.session_id}-{secrets.randbits(31):08x}"
+        payload: dict[str, Any] = {
+            "V": "1.0",
+            "DTS": int(time.time()),
+            "I": correlation_id,
+            "M": "Request",
+        }
+
+        parameters: list[Any] = [{"GMI": gateway_id, "HI": header_hi, "SI": header_si}]
+        if args is not None:
+            parameters.append(args)
+
+        payload["P"] = parameters
+
+        sanitized_parameters = [{"GMI": gateway_id, "HI": header_hi, "SI": header_si}]
+        if args is not None:
+            sanitized_parameters.append(args)
+
+        _LOGGER.debug(
+            "Beanbag WebSocket send correlation=%s header=%s args=%s",
+            correlation_id,
+            sanitized_parameters[0],
+            sanitized_parameters[1:] if len(sanitized_parameters) > 1 else (),
+        )
+
+        await websocket.send_json(payload)
+
+        while True:
+            message = await websocket.receive_json()
+            if not isinstance(message, dict):
+                _LOGGER.debug("Ignoring non-object WebSocket frame: %s", type(message))
+                continue
+
+            message_id = message.get("I")
+            if message_id != correlation_id:
+                _LOGGER.debug(
+                    "Ignoring Beanbag WebSocket frame with correlation %s", message_id
+                )
+                continue
+
+            if "R" in message:
+                _LOGGER.debug("Beanbag WebSocket received reply for %s", correlation_id)
+                return message["R"]
+
+            if message.get("M") == "Notify":
+                _LOGGER.debug(
+                    "Beanbag WebSocket received notify for %s; waiting for reply",
+                    correlation_id,
+                )
+                continue
+
+            raise BeanbagWebSocketError(
+                "Beanbag WebSocket response missing result payload"
+            )
 
 
 __all__ = [
