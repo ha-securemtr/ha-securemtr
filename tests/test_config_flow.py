@@ -1,7 +1,8 @@
-"""Tests for the SecureMTR integration config flow and setup."""
+"""Tests for the securemtr integration config flow and setup."""
 
 from __future__ import annotations
 
+import hashlib
 from pathlib import Path
 from types import SimpleNamespace
 import sys
@@ -52,10 +53,11 @@ async def test_async_setup_initializes_domain_storage(
 @pytest.mark.asyncio
 async def test_async_setup_entry_stores_entry_data(hass_fixture: HomeAssistant) -> None:
     """Ensure async_setup_entry keeps the provided credential data."""
+    hashed_password = hashlib.md5("secure".encode("utf-8")).hexdigest()
     entry = SimpleNamespace(
         entry_id="entry-1",
         unique_id="user@example.com",
-        data={CONF_EMAIL: "user@example.com", CONF_PASSWORD: "secure"},
+        data={CONF_EMAIL: "user@example.com", CONF_PASSWORD: hashed_password},
     )
 
     assert await async_setup_entry(hass_fixture, entry)
@@ -99,11 +101,34 @@ async def test_config_flow_creates_entry(hass_fixture: HomeAssistant) -> None:
         {CONF_EMAIL: " User@Example.com ", CONF_PASSWORD: "secret"}
     )
 
+    expected_hash = hashlib.md5("secret".encode("utf-8")).hexdigest()
+
     assert result["type"] == FlowResultType.CREATE_ENTRY
     assert result["title"] == "User@Example.com"
     assert result["data"] == {
         CONF_EMAIL: "User@Example.com",
-        CONF_PASSWORD: "secret",
+        CONF_PASSWORD: expected_hash,
     }
     flow.async_set_unique_id.assert_awaited_once_with("user@example.com")
     flow._abort_if_unique_id_configured.assert_called_once()
+
+
+@pytest.mark.asyncio
+async def test_config_flow_rejects_long_password(
+    hass_fixture: HomeAssistant,
+) -> None:
+    """Ensure config flow rejects passwords longer than the mobile app allows."""
+    flow = SecuremtrConfigFlow()
+    flow.hass = hass_fixture
+
+    flow.async_set_unique_id = AsyncMock()
+    flow._abort_if_unique_id_configured = Mock()
+
+    result = await flow.async_step_user(
+        {CONF_EMAIL: "user@example.com", CONF_PASSWORD: "x" * 13}
+    )
+
+    assert result["type"] == FlowResultType.FORM
+    assert result["errors"] == {CONF_PASSWORD: "password_too_long"}
+    flow.async_set_unique_id.assert_not_called()
+    flow._abort_if_unique_id_configured.assert_not_called()
