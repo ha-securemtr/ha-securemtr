@@ -21,10 +21,12 @@ if str(PROJECT_ROOT) not in sys.path:
 
 from custom_components.securemtr import (
     DOMAIN,
+    SecuremtrRuntimeData,
     async_setup,
     async_setup_entry,
     async_unload_entry,
 )
+from custom_components.securemtr.beanbag import BeanbagSession
 from custom_components.securemtr.config_flow import SecuremtrConfigFlow
 
 
@@ -41,6 +43,60 @@ async def hass_fixture(tmp_path_factory: TempPathFactory) -> HomeAssistant:
         await hass.async_stop()
 
 
+class DummyWebSocket:
+    """Provide a closable WebSocket stand-in."""
+
+    def __init__(self) -> None:
+        self.closed = False
+
+    async def close(self) -> None:
+        """Mark the WebSocket as closed."""
+
+        self.closed = True
+
+
+class DummyBackend:
+    """Return canned session data for backend startup."""
+
+    def __init__(self) -> None:
+        self.login_calls: list[tuple[str, str]] = []
+        self.session = BeanbagSession(
+            user_id=42,
+            session_id="session-id",
+            token="jwt-token",
+            token_timestamp=None,
+            gateways=(),
+        )
+        self.websocket = DummyWebSocket()
+
+    async def login_and_connect(
+        self, email: str, password_digest: str
+    ) -> tuple[BeanbagSession, DummyWebSocket]:
+        """Record credentials and return canned session details."""
+
+        self.login_calls.append((email, password_digest))
+        return self.session, self.websocket
+
+
+@pytest.fixture
+def backend_patch(monkeypatch: pytest.MonkeyPatch) -> DummyBackend:
+    """Stub Beanbag backend construction during tests."""
+
+    fake_session = object()
+    backend = DummyBackend()
+
+    monkeypatch.setattr(
+        "custom_components.securemtr.async_get_clientsession",
+        lambda hass: fake_session,
+    )
+    monkeypatch.setattr(
+        "custom_components.securemtr.BeanbagBackend",
+        lambda session: backend,
+    )
+
+    return backend
+
+
 @pytest.mark.asyncio
 async def test_async_setup_initializes_domain_storage(
     hass_fixture: HomeAssistant,
@@ -51,7 +107,9 @@ async def test_async_setup_initializes_domain_storage(
 
 
 @pytest.mark.asyncio
-async def test_async_setup_entry_stores_entry_data(hass_fixture: HomeAssistant) -> None:
+async def test_async_setup_entry_stores_entry_data(
+    hass_fixture: HomeAssistant, backend_patch: DummyBackend
+) -> None:
     """Ensure async_setup_entry keeps the provided credential data."""
     hashed_password = hashlib.md5("secure".encode("utf-8")).hexdigest()
     entry = SimpleNamespace(
@@ -61,19 +119,32 @@ async def test_async_setup_entry_stores_entry_data(hass_fixture: HomeAssistant) 
     )
 
     assert await async_setup_entry(hass_fixture, entry)
-    assert hass_fixture.data[DOMAIN][entry.entry_id]["data"] == entry.data
+    await hass_fixture.async_block_till_done()
+
+    runtime = hass_fixture.data[DOMAIN][entry.entry_id]
+    assert isinstance(runtime, SecuremtrRuntimeData)
+    assert runtime.session is backend_patch.session
+    assert runtime.websocket is backend_patch.websocket
+    assert backend_patch.login_calls == [("user@example.com", hashed_password)]
 
 
 @pytest.mark.asyncio
 async def test_async_unload_entry_removes_entry_data(
-    hass_fixture: HomeAssistant,
+    hass_fixture: HomeAssistant, backend_patch: DummyBackend
 ) -> None:
     """Ensure async_unload_entry clears stored data."""
-    hass_fixture.data.setdefault(DOMAIN, {})["entry-2"] = {"data": {}}
-    entry = SimpleNamespace(entry_id="entry-2", unique_id="user@example.com", data={})
+    entry = SimpleNamespace(
+        entry_id="entry-2",
+        unique_id="user@example.com",
+        data={CONF_EMAIL: "user@example.com", CONF_PASSWORD: "digest"},
+    )
+
+    assert await async_setup_entry(hass_fixture, entry)
+    await hass_fixture.async_block_till_done()
 
     assert await async_unload_entry(hass_fixture, entry)
     assert "entry-2" not in hass_fixture.data[DOMAIN]
+    assert backend_patch.websocket.closed
 
 
 @pytest.mark.asyncio
