@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Callable
 from contextlib import suppress
 from dataclasses import dataclass, field
+from datetime import datetime
 import logging
 from typing import Any
 
@@ -13,6 +15,8 @@ from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import CONF_EMAIL, CONF_PASSWORD
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
+from homeassistant.helpers.event import async_track_time_change
+from homeassistant.util import dt as dt_util
 
 from .beanbag import (
     BeanbagBackend,
@@ -45,6 +49,8 @@ class SecuremtrRuntimeData:
     device_metadata: dict[str, Any] | None = None
     device_configuration: dict[str, Any] | None = None
     state_snapshot: BeanbagStateSnapshot | None = None
+    consumption_metrics_log: list[dict[str, Any]] = field(default_factory=list)
+    consumption_schedule_unsub: Callable[[], None] | None = None
 
 
 def _entry_display_name(entry: ConfigEntry) -> str:
@@ -82,12 +88,30 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
     runtime.startup_task = hass.async_create_task(_async_start_backend(entry, runtime))
 
+    def _scheduled_consumption_refresh(now: datetime) -> None:
+        """Trigger the scheduled consumption metrics task."""
+
+        _LOGGER.debug(
+            "Scheduled consumption metrics refresh triggered for %s", entry_identifier
+        )
+        hass.async_create_task(consumption_metrics(hass, entry))
+
+    runtime.consumption_schedule_unsub = async_track_time_change(
+        hass,
+        _scheduled_consumption_refresh,
+        hour=1,
+        minute=0,
+        second=0,
+    )
+
     config_entries_helper = getattr(hass, "config_entries", None)
     if config_entries_helper is not None:
-        await config_entries_helper.async_forward_entry_setups(entry, ["switch"])
+        await config_entries_helper.async_forward_entry_setups(
+            entry, ["switch", "button"]
+        )
     else:
         _LOGGER.debug(
-            "config_entries helper unavailable; skipping switch platform setup for %s",
+            "config_entries helper unavailable; skipping platform setup for %s",
             entry_identifier,
         )
 
@@ -106,7 +130,7 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     config_entries_helper = getattr(hass, "config_entries", None)
     if config_entries_helper is not None:
         unload_ok = await config_entries_helper.async_unload_platforms(
-            entry, ["switch"]
+            entry, ["switch", "button"]
         )
     else:
         unload_ok = True
@@ -118,6 +142,10 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     if runtime is None:
         _LOGGER.info("securemtr config entry unloaded: %s", entry_identifier)
         return unload_ok
+
+    if runtime.consumption_schedule_unsub is not None:
+        runtime.consumption_schedule_unsub()
+        runtime.consumption_schedule_unsub = None
 
     if runtime.startup_task is not None and not runtime.startup_task.done():
         runtime.startup_task.cancel()
@@ -183,6 +211,46 @@ async def _async_start_backend(
         runtime.controller_ready.set()
 
     _LOGGER.info("Beanbag backend connected for %s", entry_identifier)
+
+
+async def _async_refresh_connection(
+    entry: ConfigEntry, runtime: SecuremtrRuntimeData
+) -> bool:
+    """Ensure the Beanbag WebSocket connection is available."""
+
+    session = runtime.session
+    websocket = runtime.websocket
+
+    if session is not None and websocket is not None and not websocket.closed:
+        return True
+
+    email: str = entry.data.get(CONF_EMAIL, "").strip()
+    password_digest: str = entry.data.get(CONF_PASSWORD, "")
+    entry_identifier = _entry_display_name(entry)
+
+    if not email or not password_digest:
+        _LOGGER.error(
+            "Missing credentials for securemtr entry %s during reconnection",
+            entry_identifier,
+        )
+        return False
+
+    try:
+        session, websocket = await runtime.backend.login_and_connect(
+            email, password_digest
+        )
+    except BeanbagError as error:
+        _LOGGER.error(
+            "Failed to refresh Beanbag connection for %s: %s",
+            entry_identifier,
+            error,
+        )
+        return False
+
+    runtime.session = session
+    runtime.websocket = websocket
+    _LOGGER.info("Re-established Beanbag connection for %s", entry_identifier)
+    return True
 
 
 @dataclass(slots=True)
@@ -316,6 +384,73 @@ def _build_controller(
         serial_number=serial_number,
         firmware_version=firmware_version,
         model=model,
+    )
+
+
+async def consumption_metrics(hass: HomeAssistant, entry: ConfigEntry) -> None:
+    """Refresh and persist seven-day consumption metrics for the controller."""
+
+    entry_identifier = _entry_display_name(entry)
+    domain_state = hass.data.get(DOMAIN, {})
+    runtime: SecuremtrRuntimeData | None = domain_state.get(entry.entry_id)
+
+    if runtime is None:
+        _LOGGER.error(
+            "Runtime data unavailable while requesting consumption metrics for %s",
+            entry_identifier,
+        )
+        return
+
+    if not await _async_refresh_connection(entry, runtime):
+        return
+
+    session = runtime.session
+    websocket = runtime.websocket
+    controller = runtime.controller
+
+    if session is None or websocket is None or controller is None:
+        _LOGGER.error(
+            "Secure Meters connection unavailable for energy history request: %s",
+            entry_identifier,
+        )
+        return
+
+    try:
+        samples = await runtime.backend.read_energy_history(
+            session, websocket, controller.gateway_id
+        )
+    except BeanbagError as error:
+        _LOGGER.error(
+            "Failed to fetch energy history for %s: %s",
+            entry_identifier,
+            error,
+        )
+        return
+
+    metrics: list[dict[str, Any]] = []
+    for sample in samples:
+        iso_timestamp = dt_util.utc_from_timestamp(sample.timestamp).isoformat()
+        metrics.append(
+            {
+                "timestamp": iso_timestamp,
+                "epoch_seconds": sample.timestamp,
+                "primary_energy_kwh": sample.primary_energy_kwh,
+                "boost_energy_kwh": sample.boost_energy_kwh,
+                "primary_scheduled_minutes": sample.primary_scheduled_minutes,
+                "primary_active_minutes": sample.primary_active_minutes,
+                "boost_scheduled_minutes": sample.boost_scheduled_minutes,
+                "boost_active_minutes": sample.boost_active_minutes,
+            }
+        )
+
+    if len(metrics) > 7:
+        metrics = metrics[-7:]
+
+    runtime.consumption_metrics_log = metrics
+    _LOGGER.debug(
+        "Secure Meters consumption metrics updated (%s entries): %s",
+        len(metrics),
+        metrics,
     )
 
 
