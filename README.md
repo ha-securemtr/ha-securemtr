@@ -74,6 +74,21 @@ For anyone using the **E7+ Wifi-enabled Smart Water Heater Controller** from Sec
 
 ---
 
+## Configure statistics options
+
+Open the integration entry in **Settings → Devices & Services** and choose **Configure** to match the statistics with your local setup:
+
+- **Timezone** — pick the place where the water heater is installed. Leave the default if you are in Ireland.
+- **Primary anchor** — time of day you expect off-peak heating to fall. Keeping 03:00 works well for most homes.
+- **Boost anchor** — time you normally run boost heating. 17:00 is a good starting point for evening hot water.
+- **Anchor strategy** — choose how the integration decides on the daily timestamp. Leave it on **Midpoint** unless you have a special schedule.
+- **Element power (kW)** — the typical power draw of your immersion element. Keep 2.85 kW unless you know a different value.
+- **Prefer device energy** — leave on so the integration uses readings from the controller when they look correct.
+
+The integration updates the numbers once each night after **01:00 local time** so you can review yesterday’s usage the next morning.
+
+---
+
 ## Tips
 
 - **Boost on demand:** Create a one-tap button in a dashboard to trigger a boost cycle before showers or laundry.
@@ -95,12 +110,22 @@ Tap a button on your dashboard, call it from the Services panel, or trigger it i
 
 ## Timed boost sensors
 
-Two new sensors help you see what the heater is doing:
+Two sensors help you see what the heater is doing:
 
 - **Boost Active** shows if a boost is running right now.
 - **Boost Ends** counts down to when the current boost will switch off.
 
 Add them to a dashboard card or use them in automations—for example, to skip starting another boost while one is already underway.
+
+## Energy & runtime sensors
+
+Daily statistics from the controller are available as Home Assistant sensors:
+
+- **Primary Energy Total** and **Boost Energy Total** expose cumulative kWh values that match the statistics exported to the Energy dashboard.
+- **Primary Runtime (Last Day)** and **Boost Runtime (Last Day)** report how long each element actually heated yesterday.
+- **Primary Scheduled (Last Day)** and **Boost Scheduled (Last Day)** show the total scheduled minutes for yesterday, making it easy to compare the planned runtime with the actual runtime.
+
+Each sensor includes the calendar day it represents and updates automatically after the nightly statistics refresh. Add them to dashboards, set up automations, or monitor long-term trends alongside the recorder statistics.
 ---
 
 ## Troubleshooting

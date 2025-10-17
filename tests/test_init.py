@@ -3,8 +3,9 @@
 from __future__ import annotations
 
 import asyncio
-from dataclasses import dataclass
-from datetime import datetime, timezone
+from dataclasses import dataclass, field
+from datetime import datetime, time, timezone
+from itertools import accumulate
 from typing import Any, Awaitable
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
@@ -29,9 +30,27 @@ from custom_components.securemtr.beanbag import (
     BeanbagError,
     BeanbagGateway,
     BeanbagEnergySample,
+    DailyProgram,
     BeanbagSession,
     BeanbagStateSnapshot,
+    WeeklyProgram,
 )
+from custom_components.securemtr.config_flow import (
+    CONF_ANCHOR_STRATEGY,
+    CONF_BOOST_ANCHOR,
+    CONF_ELEMENT_POWER_KW,
+    CONF_PRIMARY_ANCHOR,
+    CONF_TIME_ZONE,
+    DEFAULT_BOOST_ANCHOR,
+    DEFAULT_ELEMENT_POWER_KW,
+    DEFAULT_PRIMARY_ANCHOR,
+    DEFAULT_TIMEZONE,
+)
+from custom_components.securemtr.entity import slugify_identifier
+from custom_components.securemtr.utils import report_day_for_sample, safe_anchor_datetime
+from homeassistant.components.recorder.statistics import StatisticMeanType
+from homeassistant.const import UnitOfEnergy, UnitOfTime
+from homeassistant.util import dt as dt_util
 
 
 @dataclass(slots=True)
@@ -42,6 +61,7 @@ class DummyConfigEntry:
     data: dict[str, str]
     unique_id: str | None = None
     title: str | None = None
+    options: dict[str, Any] = field(default_factory=dict)
 
 
 class FakeWebSocket:
@@ -58,6 +78,56 @@ class FakeWebSocket:
         self.closed = True
 
 
+@pytest.fixture(autouse=True)
+def store_instances(monkeypatch: pytest.MonkeyPatch) -> list[Any]:
+    """Replace the Home Assistant Store with an in-memory implementation."""
+
+    instances: list[Any] = []
+
+    class FakeStore:
+        def __init__(self, hass, version, key, *_args, **_kwargs) -> None:
+            self.hass = hass
+            self.version = version
+            self.key = key
+            self.data: dict[str, Any] | None = None
+            self.saved: list[dict[str, Any]] = []
+
+        async def async_load(self) -> dict[str, Any] | None:
+            """Return previously saved data."""
+
+            return self.data
+
+        async def async_save(self, data: dict[str, Any]) -> None:
+            """Store the provided payload."""
+
+            self.data = data
+            self.saved.append(data)
+
+    def factory(hass, version, key, *_args, **_kwargs):
+        store = FakeStore(hass, version, key, *_args, **_kwargs)
+        instances.append(store)
+        return store
+
+    monkeypatch.setattr("custom_components.securemtr.Store", factory)
+    return instances
+
+
+@pytest.fixture
+def capture_statistics(monkeypatch: pytest.MonkeyPatch):
+    """Capture statistics imports for assertions."""
+
+    captured: dict[str, tuple[dict[str, Any], list[dict[str, Any]]]] = {}
+
+    def _capture_statistics(_hass, metadata, statistics):
+        captured[metadata["statistic_id"]] = (metadata, list(statistics))
+
+    monkeypatch.setattr(
+        "custom_components.securemtr.async_add_external_statistics",
+        _capture_statistics,
+    )
+    return captured
+
+
 class FakeBeanbagBackend:
     """Capture login requests and provide canned responses."""
 
@@ -71,6 +141,7 @@ class FakeBeanbagBackend:
         self.configuration_calls: list[str] = []
         self.state_calls: list[str] = []
         self.energy_history_calls: list[tuple[str, int]] = []
+        self.program_calls: list[tuple[str, str]] = []
         self._session = BeanbagSession(
             user_id=1,
             session_id="session-id",
@@ -86,6 +157,12 @@ class FakeBeanbagBackend:
             ),
         )
         self.websocket = FakeWebSocket()
+        self._primary_program: WeeklyProgram = tuple(
+            DailyProgram((120, None, None), (240, None, None)) for _ in range(7)
+        )
+        self._boost_program: WeeklyProgram = tuple(
+            DailyProgram((1020, None, None), (1080, None, None)) for _ in range(7)
+        )
 
     async def login_and_connect(
         self, email: str, password_digest: str
@@ -200,6 +277,23 @@ class FakeBeanbagBackend:
             )
         return samples
 
+    async def read_weekly_program(
+        self,
+        session: BeanbagSession,
+        websocket: FakeWebSocket,
+        gateway_id: str,
+        *,
+        zone: str,
+    ) -> WeeklyProgram:
+        """Return a weekly program for the requested zone."""
+
+        self.program_calls.append((zone, gateway_id))
+        if zone == "primary":
+            return self._primary_program
+        if zone == "boost":
+            return self._boost_program
+        raise BeanbagError(f"Unknown zone {zone}")
+
     async def turn_controller_on(
         self, session: BeanbagSession, websocket: FakeWebSocket, gateway_id: str
     ) -> None:
@@ -260,6 +354,9 @@ class FakeHass:
             return
         await asyncio.gather(*self._tasks)
 
+    def verify_event_loop_thread(self, _caller: str) -> None:
+        """Stub verification hook for dispatcher calls."""
+
 
 @pytest.fixture
 def track_time_spy(monkeypatch: pytest.MonkeyPatch):
@@ -293,6 +390,7 @@ def track_time_spy(monkeypatch: pytest.MonkeyPatch):
 async def test_async_setup_entry_starts_backend(
     monkeypatch: pytest.MonkeyPatch,
     track_time_spy,
+    store_instances,
 ) -> None:
     """Verify that setup schedules the Beanbag login and stores runtime data."""
 
@@ -358,6 +456,8 @@ async def test_async_setup_entry_starts_backend(
     assert runtime.timed_boost_active is False
     assert runtime.timed_boost_end_minute is None
     assert runtime.timed_boost_end_time is None
+    assert store_instances
+    assert runtime.statistics_store is store_instances[0]
     assert hass.config_entries.forwarded == [
         ("switch",),
         ("button", "binary_sensor", "sensor"),
@@ -750,6 +850,8 @@ async def test_async_unload_entry_without_config_entries_helper(
 async def test_consumption_metrics_refreshes_history(
     monkeypatch: pytest.MonkeyPatch,
     track_time_spy,
+    capture_statistics,
+    store_instances,
 ) -> None:
     """Ensure consumption metrics refresh reconnects and stores samples."""
 
@@ -757,6 +859,184 @@ async def test_consumption_metrics_refreshes_history(
     track_time_spy(hass)
     entry = DummyConfigEntry(
         entry_id="metrics",
+        unique_id="user@example.com",
+        data={"email": "user@example.com", "password": "digest"},
+        title="SecureMTR",
+    )
+
+    fake_session = object()
+    backend = FakeBeanbagBackend(fake_session)
+
+    dispatch_calls: list[tuple[object, str]] = []
+
+    def _capture_dispatch(hass_obj: object, entry_id: str) -> None:
+        dispatch_calls.append((hass_obj, entry_id))
+
+    monkeypatch.setattr(
+        "custom_components.securemtr.async_dispatch_runtime_update",
+        _capture_dispatch,
+    )
+    monkeypatch.setattr(
+        "custom_components.securemtr.async_get_clientsession",
+        lambda hass_obj: fake_session,
+    )
+    monkeypatch.setattr(
+        "custom_components.securemtr.BeanbagBackend",
+        lambda session: backend,
+    )
+
+    assert await async_setup_entry(hass, entry)
+    await hass.async_block_till_done()
+
+    runtime = hass.data[DOMAIN][entry.entry_id]
+    runtime.websocket.closed = True
+    initial_logins = len(backend.login_calls)
+
+    await consumption_metrics(hass, entry)
+
+    assert len(backend.login_calls) == initial_logins + 1
+    assert backend.energy_history_calls == [("gateway-1", 1)]
+    assert backend.program_calls == [("primary", "gateway-1"), ("boost", "gateway-1")]
+
+    tz = dt_util.get_time_zone("Europe/Dublin")
+    base_timestamp = 1_700_000_000
+    offsets = range(1, 8)
+    expected_log = []
+    for offset in offsets:
+        epoch = base_timestamp + offset * 86_400
+        report_day = report_day_for_sample(epoch, tz)
+        expected_log.append(
+            {
+                "timestamp": datetime.fromtimestamp(epoch, timezone.utc).isoformat(),
+                "epoch_seconds": epoch,
+                "report_day": report_day.isoformat(),
+                "primary_energy_kwh": 1.0 + offset,
+                "boost_energy_kwh": 0.5 * offset,
+                "primary_scheduled_minutes": 180 + offset * 10,
+                "primary_active_minutes": 120 + offset * 10,
+                "boost_scheduled_minutes": offset * 15,
+                "boost_active_minutes": offset * 5,
+            }
+        )
+
+    assert runtime.consumption_metrics_log == expected_log
+
+    entry_slug = slugify_identifier(entry.title or entry.entry_id)
+    stat_ids = {
+        f"{DOMAIN}:{entry_slug}:primary_energy_kwh",
+        f"{DOMAIN}:{entry_slug}:boost_energy_kwh",
+        f"{DOMAIN}:{entry_slug}:primary_runtime_h",
+        f"{DOMAIN}:{entry_slug}:primary_sched_h",
+        f"{DOMAIN}:{entry_slug}:boost_runtime_h",
+        f"{DOMAIN}:{entry_slug}:boost_sched_h",
+    }
+    assert set(capture_statistics) == stat_ids
+
+    fallback_power = 2.85
+    primary_energy = [
+        (120 + offset * 10) / 60 * fallback_power for offset in offsets
+    ]
+    primary_cumulative = list(accumulate(primary_energy))
+    boost_energy = [(offset * 5) / 60 * fallback_power for offset in offsets]
+    boost_cumulative = list(accumulate(boost_energy))
+
+    def _assert_energy(statistic_id: str, values: list[float], cumulative: list[float], anchor_time: time) -> None:
+        metadata, stats = capture_statistics[statistic_id]
+        assert metadata["unit_of_measurement"] == UnitOfEnergy.KILO_WATT_HOUR
+        assert metadata["has_sum"] is True
+        assert metadata["mean_type"] is StatisticMeanType.NONE
+        for index, entry in enumerate(stats):
+            day = report_day_for_sample(base_timestamp + (index + 1) * 86_400, tz)
+            expected_anchor = safe_anchor_datetime(day, anchor_time, tz)
+            assert entry["start"] == expected_anchor
+            assert entry["state"] == pytest.approx(values[index])
+            assert entry["sum"] == pytest.approx(cumulative[index])
+
+    _assert_energy(
+        f"{DOMAIN}:{entry_slug}:primary_energy_kwh",
+        primary_energy,
+        primary_cumulative,
+        time(3, 0),
+    )
+    _assert_energy(
+        f"{DOMAIN}:{entry_slug}:boost_energy_kwh",
+        boost_energy,
+        boost_cumulative,
+        time(17, 30),
+    )
+
+    primary_runtime = [(120 + offset * 10) / 60 for offset in offsets]
+    primary_scheduled = [(180 + offset * 10) / 60 for offset in offsets]
+    boost_runtime = [(offset * 5) / 60 for offset in offsets]
+    boost_scheduled = [(offset * 15) / 60 for offset in offsets]
+
+    def _assert_duration(statistic_id: str, values: list[float], anchor_time: time) -> None:
+        metadata, stats = capture_statistics[statistic_id]
+        assert metadata["unit_of_measurement"] == UnitOfTime.HOURS
+        assert metadata["has_sum"] is False
+        assert metadata["mean_type"] is StatisticMeanType.ARITHMETIC
+        for index, entry in enumerate(stats):
+            day = report_day_for_sample(base_timestamp + (index + 1) * 86_400, tz)
+            expected_anchor = safe_anchor_datetime(day, anchor_time, tz)
+            assert entry["start"] == expected_anchor
+            assert entry["mean"] == pytest.approx(values[index])
+            assert entry["min"] == pytest.approx(values[index])
+            assert entry["max"] == pytest.approx(values[index])
+
+    _assert_duration(
+        f"{DOMAIN}:{entry_slug}:primary_runtime_h", primary_runtime, time(3, 0)
+    )
+    _assert_duration(
+        f"{DOMAIN}:{entry_slug}:primary_sched_h", primary_scheduled, time(3, 0)
+    )
+    _assert_duration(
+        f"{DOMAIN}:{entry_slug}:boost_runtime_h", boost_runtime, time(17, 30)
+    )
+    _assert_duration(
+        f"{DOMAIN}:{entry_slug}:boost_sched_h", boost_scheduled, time(17, 30)
+    )
+
+    assert store_instances and store_instances[0].saved
+    persisted = store_instances[0].saved[-1]
+    expected_last_day = report_day_for_sample(
+        base_timestamp + offsets[-1] * 86_400, tz
+    ).isoformat()
+    assert persisted["primary"]["last_day"] == expected_last_day
+    assert persisted["boost"]["last_day"] == expected_last_day
+    assert persisted["primary"]["energy_sum"] == pytest.approx(primary_cumulative[-1])
+    assert persisted["boost"]["energy_sum"] == pytest.approx(boost_cumulative[-1])
+    assert runtime.statistics_state == persisted
+
+    recent = runtime.statistics_recent
+    assert isinstance(recent, dict)
+    primary_recent = recent["primary"]
+    boost_recent = recent["boost"]
+
+    assert primary_recent["report_day"] == expected_last_day
+    assert primary_recent["runtime_hours"] == pytest.approx(primary_runtime[-1])
+    assert primary_recent["scheduled_hours"] == pytest.approx(primary_scheduled[-1])
+    assert primary_recent["energy_sum"] == pytest.approx(primary_cumulative[-1])
+
+    assert boost_recent["report_day"] == expected_last_day
+    assert boost_recent["runtime_hours"] == pytest.approx(boost_runtime[-1])
+    assert boost_recent["scheduled_hours"] == pytest.approx(boost_scheduled[-1])
+    assert boost_recent["energy_sum"] == pytest.approx(boost_cumulative[-1])
+
+    assert dispatch_calls == [(hass, entry.entry_id)]
+
+@pytest.mark.asyncio
+async def test_consumption_metrics_skips_processed_days(
+    monkeypatch: pytest.MonkeyPatch,
+    track_time_spy,
+    capture_statistics,
+    store_instances,
+) -> None:
+    """Ensure repeated refreshes avoid duplicating statistics."""
+
+    hass = FakeHass()
+    track_time_spy(hass)
+    entry = DummyConfigEntry(
+        entry_id="metrics-idempotent",
         unique_id="user@example.com",
         data={"email": "user@example.com", "password": "digest"},
         title="SecureMTR",
@@ -779,29 +1059,161 @@ async def test_consumption_metrics_refreshes_history(
 
     runtime = hass.data[DOMAIN][entry.entry_id]
     runtime.websocket.closed = True
-    initial_logins = len(backend.login_calls)
+
+    await consumption_metrics(hass, entry)
+    first_save_count = len(store_instances[0].saved)
+    persisted = store_instances[0].saved[-1]
+    capture_statistics.clear()
 
     await consumption_metrics(hass, entry)
 
-    assert len(backend.login_calls) == initial_logins + 1
-    assert backend.energy_history_calls == [("gateway-1", 1)]
-    expected = [
-        {
-            "timestamp": datetime.fromtimestamp(
-                1_700_000_000 + offset * 86_400, timezone.utc
-            ).isoformat(),
-            "epoch_seconds": 1_700_000_000 + offset * 86_400,
-            "primary_energy_kwh": 1.0 + offset,
-            "boost_energy_kwh": 0.5 * offset,
-            "primary_scheduled_minutes": 180 + offset * 10,
-            "primary_active_minutes": 120 + offset * 10,
-            "boost_scheduled_minutes": offset * 15,
-            "boost_active_minutes": offset * 5,
-        }
-        for offset in range(1, 8)
-    ]
-    assert runtime.consumption_metrics_log == expected
+    assert not capture_statistics
+    assert len(store_instances[0].saved) == first_save_count
+    assert runtime.statistics_state == persisted
+    assert len(backend.energy_history_calls) == 2
 
+
+@pytest.mark.asyncio
+async def test_consumption_metrics_imports_only_new_days(
+    monkeypatch: pytest.MonkeyPatch,
+    track_time_spy,
+    capture_statistics,
+    store_instances,
+) -> None:
+    """Ensure only unprocessed days trigger external statistics imports."""
+
+    hass = FakeHass()
+    track_time_spy(hass)
+    entry = DummyConfigEntry(
+        entry_id="metrics-incremental",
+        unique_id="user@example.com",
+        data={"email": "user@example.com", "password": "digest"},
+        title="SecureMTR",
+    )
+
+    fake_session = object()
+    backend = FakeBeanbagBackend(fake_session)
+
+    monkeypatch.setattr(
+        "custom_components.securemtr.async_get_clientsession",
+        lambda hass_obj: fake_session,
+    )
+    monkeypatch.setattr(
+        "custom_components.securemtr.BeanbagBackend",
+        lambda session: backend,
+    )
+
+    assert await async_setup_entry(hass, entry)
+    await hass.async_block_till_done()
+
+    runtime = hass.data[DOMAIN][entry.entry_id]
+    runtime.websocket.closed = True
+
+    tz = dt_util.get_time_zone("Europe/Dublin")
+    base_timestamp = 1_700_000_000
+    processed_day = report_day_for_sample(base_timestamp + 4 * 86_400, tz)
+
+    store_instances[0].data = {
+        "primary": {"energy_sum": 10.0, "last_day": processed_day.isoformat()},
+        "boost": {"energy_sum": 5.0, "last_day": processed_day.isoformat()},
+    }
+    runtime.statistics_state = None
+
+    await consumption_metrics(hass, entry)
+
+    entry_slug = slugify_identifier(entry.title or entry.entry_id)
+    primary_id = f"{DOMAIN}:{entry_slug}:primary_energy_kwh"
+    boost_id = f"{DOMAIN}:{entry_slug}:boost_energy_kwh"
+
+    expected_days = [
+        report_day_for_sample(base_timestamp + offset * 86_400, tz)
+        for offset in range(5, 8)
+    ]
+
+    metadata, primary_stats = capture_statistics[primary_id]
+    assert metadata["has_sum"] is True
+    assert len(primary_stats) == len(expected_days)
+    assert primary_stats[0]["start"].date() == expected_days[0]
+    assert primary_stats[0]["sum"] > 10.0
+
+    metadata, boost_stats = capture_statistics[boost_id]
+    assert metadata["has_sum"] is True
+    assert len(boost_stats) == len(expected_days)
+    assert boost_stats[0]["start"].date() == expected_days[0]
+    assert boost_stats[0]["sum"] > 5.0
+
+    for statistic_id, (_metadata, stats) in capture_statistics.items():
+        if statistic_id.endswith("_h"):
+            continue
+        assert len(stats) == len(expected_days)
+
+    assert store_instances[0].saved
+    saved_state = store_instances[0].saved[-1]
+    assert saved_state["primary"]["last_day"] == expected_days[-1].isoformat()
+    assert saved_state["boost"]["last_day"] == expected_days[-1].isoformat()
+
+
+@pytest.mark.asyncio
+async def test_consumption_metrics_honours_start_anchor_strategy(
+    monkeypatch: pytest.MonkeyPatch,
+    track_time_spy,
+    capture_statistics,
+    store_instances,
+) -> None:
+    """Ensure the start anchor strategy uses schedule boundaries."""
+
+    hass = FakeHass()
+    track_time_spy(hass)
+    entry = DummyConfigEntry(
+        entry_id="metrics-anchors",
+        unique_id="user@example.com",
+        data={"email": "user@example.com", "password": "digest"},
+        title="SecureMTR",
+        options={
+            CONF_ANCHOR_STRATEGY: "start",
+            CONF_TIME_ZONE: DEFAULT_TIMEZONE,
+            CONF_PRIMARY_ANCHOR: DEFAULT_PRIMARY_ANCHOR,
+            CONF_BOOST_ANCHOR: DEFAULT_BOOST_ANCHOR,
+            CONF_ELEMENT_POWER_KW: DEFAULT_ELEMENT_POWER_KW,
+        },
+    )
+
+    fake_session = object()
+    backend = FakeBeanbagBackend(fake_session)
+
+    monkeypatch.setattr(
+        "custom_components.securemtr.async_get_clientsession",
+        lambda hass_obj: fake_session,
+    )
+    monkeypatch.setattr(
+        "custom_components.securemtr.BeanbagBackend",
+        lambda session: backend,
+    )
+
+    assert await async_setup_entry(hass, entry)
+    await hass.async_block_till_done()
+
+    runtime = hass.data[DOMAIN][entry.entry_id]
+    runtime.websocket.closed = True
+
+    await consumption_metrics(hass, entry)
+
+    entry_slug = slugify_identifier(entry.title or entry.entry_id)
+    primary_id = f"{DOMAIN}:{entry_slug}:primary_energy_kwh"
+    boost_id = f"{DOMAIN}:{entry_slug}:boost_energy_kwh"
+
+    tz = dt_util.get_time_zone(DEFAULT_TIMEZONE)
+    assert tz is not None
+    base_timestamp = 1_700_000_000
+    first_day = report_day_for_sample(base_timestamp + 86_400, tz)
+
+    metadata, primary_stats = capture_statistics[primary_id]
+    assert metadata["has_sum"] is True
+    assert primary_stats[0]["start"] == safe_anchor_datetime(first_day, time(2, 0), tz)
+
+    metadata, boost_stats = capture_statistics[boost_id]
+    assert metadata["has_sum"] is True
+    assert boost_stats[0]["start"] == safe_anchor_datetime(first_day, time(17, 0), tz)
 
 @pytest.mark.asyncio
 async def test_consumption_metrics_missing_runtime() -> None:

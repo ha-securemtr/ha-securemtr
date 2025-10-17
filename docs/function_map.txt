@@ -1,5 +1,5 @@
 custom_components.securemtr.__init__.async_setup: Set up the securemtr integration.
-custom_components.securemtr.__init__.SecuremtrRuntimeData: Track runtime Beanbag backend state for a config entry.
+custom_components.securemtr.__init__.SecuremtrRuntimeData: Track runtime Beanbag backend state and cached statistics for a config entry.
 custom_components.securemtr.__init__.SecuremtrController: Represent the discovered Secure Meters controller.
 custom_components.securemtr.__init__.async_setup_entry: Set up securemtr from a config entry and schedule backend startup.
 custom_components.securemtr.__init__._entry_display_name: Return a non-sensitive identifier for a config entry.
@@ -8,12 +8,24 @@ custom_components.securemtr.__init__._async_start_backend: Authenticate with Bea
 custom_components.securemtr.__init__._async_refresh_connection: Ensure the Beanbag WebSocket connection is available, reconnecting with stored credentials when required.
 custom_components.securemtr.__init__._async_fetch_controller: Retrieve controller metadata via the Beanbag WebSocket.
 custom_components.securemtr.__init__._build_controller: Translate metadata and gateway context into a controller object.
-custom_components.securemtr.__init__.consumption_metrics: Refresh and persist the latest seven-day consumption metrics in runtime state.
+custom_components.securemtr.__init__.consumption_metrics: Import daily energy and runtime statistics with schedule-derived anchors and persist cumulative state.
+custom_components.securemtr.__init__._statistics_store_key: Return the persistent storage key for statistics state.
+custom_components.securemtr.__init__._load_statistics_options: Derive statistics options from the configuration entry.
+custom_components.securemtr.__init__._read_zone_program: Fetch the weekly program for a zone, returning None on failure.
+custom_components.securemtr.__init__._load_zone_state: Return the persisted cumulative sum and last processed day.
+custom_components.securemtr.__init__._store_zone_state: Persist the updated cumulative state for a zone.
+custom_components.securemtr.__init__._resolve_anchor: Select an anchor for the provided day and schedule context.
+custom_components.securemtr.__init__._build_statistic_metadata: Create metadata for a statistic export.
 custom_components.securemtr.__init__._normalize_identifier: Return a sanitized identifier candidate when possible.
 custom_components.securemtr.__init__.runtime_update_signal: Return the dispatcher signal name for runtime updates.
 custom_components.securemtr.__init__.async_dispatch_runtime_update: Notify entities that runtime state has been updated.
 custom_components.securemtr.__init__.coerce_end_time: Convert an end-minute payload into an aware datetime.
 custom_components.securemtr.config_flow.SecuremtrConfigFlow.async_step_user: Handle the initial user configuration step, enforcing the Secure Controls 12-character password limit, storing the MD5 digest, and assigning a generic entry title.
+custom_components.securemtr.config_flow._anchor_option_to_time: Return an anchor time for the provided stored option.
+custom_components.securemtr.config_flow._serialize_anchor: Return an ISO-formatted anchor string for storage.
+custom_components.securemtr.config_flow.SecuremtrConfigFlow.async_get_options_flow: Return the options flow handler for SecureMTR.
+custom_components.securemtr.config_flow.SecuremtrOptionsFlowHandler.__init__: Initialise the options flow with the stored config entry.
+custom_components.securemtr.config_flow.SecuremtrOptionsFlowHandler.async_step_init: Handle SecureMTR options for runtime statistics.
 custom_components.securemtr.beanbag.BeanbagHttpClient.login: Execute the documented Beanbag login flow while emitting sanitized diagnostics and validating the response payload.
 custom_components.securemtr.beanbag.BeanbagHttpClient._parse_gateway: Translate raw gateway payload into an object.
 custom_components.securemtr.beanbag.BeanbagWebSocketClient.connect: Open the Beanbag WebSocket using the authenticated session with sanitized handshake logging.
@@ -74,10 +86,24 @@ custom_components.securemtr.button.SecuremtrLogWeeklyScheduleButton._format_tran
 custom_components.securemtr.binary_sensor.async_setup_entry: Set up the Secure Meters boost binary sensor.
 custom_components.securemtr.binary_sensor._SecuremtrBaseBinarySensor: Provide shared behaviour for Secure Meters binary sensors.
 custom_components.securemtr.binary_sensor.SecuremtrBoostActiveBinarySensor.is_on: Return whether the timed boost is active.
-custom_components.securemtr.sensor.async_setup_entry: Set up the Secure Meters timed boost sensors.
+custom_components.securemtr.sensor.async_setup_entry: Set up the Secure Meters sensors for boost and statistics.
 custom_components.securemtr.sensor._SecuremtrBaseSensor: Provide shared behaviour for Secure Meters sensors.
 custom_components.securemtr.sensor.SecuremtrBoostEndsSensor.native_value: Return the boost end timestamp when active.
+custom_components.securemtr.sensor.SecuremtrEnergyTotalSensor.native_value: Return the cumulative energy total in kilowatt-hours for the zone.
+custom_components.securemtr.sensor.SecuremtrEnergyTotalSensor.extra_state_attributes: Provide the most recent statistic day for the zone energy total.
+custom_components.securemtr.sensor.SecuremtrDailyDurationSensor.native_value: Return the previous day's runtime or scheduled duration in hours.
+custom_components.securemtr.sensor.SecuremtrDailyDurationSensor.extra_state_attributes: Provide the report day and cumulative energy context for duration sensors.
 custom_components.securemtr.entity.slugify_identifier: Convert a controller identifier into a slug for unique IDs.
 custom_components.securemtr.entity.build_device_info: Construct device registry metadata for the provided controller.
 custom_components.securemtr.button.async_setup_entry: Set up Secure Meters button entities for a config entry.
 custom_components.securemtr.beanbag.BeanbagEnergySample: Hold a single energy history sample reported by Beanbag.
+custom_components.securemtr.utils.EnergyCalibration: Describe energy calibration parameters.
+custom_components.securemtr.utils.to_local: Convert a timestamp into an aware datetime in the provided timezone.
+custom_components.securemtr.utils.report_day_for_sample: Return the local calendar day represented by a consumption sample.
+custom_components.securemtr.utils.safe_anchor_datetime: Return an aware datetime within the requested day, skipping DST gaps and preferring the later fold when overlaps occur.
+custom_components.securemtr.utils.calibrate_energy_scale: Return calibration data describing how to interpret device energy.
+custom_components.securemtr.utils.energy_from_row: Compute energy for a row using calibration or fallback duration power.
+custom_components.securemtr.utils.cumulative_update: Return the updated cumulative value from the provided delta.
+custom_components.securemtr.schedule.canonicalize_weekly: Return merged start/end minute pairs for the provided program.
+custom_components.securemtr.schedule.day_intervals: Return schedule intervals for a day as timezone-aware datetimes.
+custom_components.securemtr.schedule.choose_anchor: Choose an anchor datetime from intervals using the provided strategy.
