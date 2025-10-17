@@ -77,6 +77,8 @@ class BeanbagStateSnapshot:
     payload: dict[str, Any]
     primary_power_on: bool | None
     timed_boost_enabled: bool | None
+    timed_boost_active: bool | None
+    timed_boost_end_minute: int | None
 
 
 type ProgramZone = Literal["primary", "boost"]
@@ -563,6 +565,8 @@ class BeanbagBackend:
 
         primary_power = self._extract_primary_power(response)
         timed_boost_enabled = self._extract_timed_boost_flag(response)
+        timed_boost_active = self._extract_timed_boost_active(response)
+        timed_boost_end_minute = self._extract_timed_boost_end_minute(response)
         _LOGGER.debug(
             "Beanbag live state reports primary power %s",
             "on" if primary_power else "off" if primary_power is False else "unknown",
@@ -575,10 +579,17 @@ class BeanbagBackend:
             if timed_boost_enabled is False
             else "unknown",
         )
+        _LOGGER.debug(
+            "Beanbag live state reports timed boost active=%s end_minute=%s",
+            timed_boost_active,
+            timed_boost_end_minute,
+        )
         return BeanbagStateSnapshot(
             payload=response,
             primary_power_on=primary_power,
             timed_boost_enabled=timed_boost_enabled,
+            timed_boost_active=timed_boost_active,
+            timed_boost_end_minute=timed_boost_end_minute,
         )
 
     async def turn_controller_on(
@@ -623,6 +634,57 @@ class BeanbagBackend:
         if acknowledgement not in (0, "0", None):
             raise BeanbagWebSocketError(
                 "Unexpected Beanbag timed boost toggle acknowledgement: "
+                f"{acknowledgement}"
+            )
+
+    async def start_timed_boost(
+        self,
+        session: BeanbagSession,
+        websocket: ClientWebSocketResponse,
+        gateway_id: str,
+        *,
+        duration_minutes: int,
+    ) -> None:
+        """Activate a timed boost run for the provided duration."""
+
+        if duration_minutes <= 0:
+            raise ValueError("Boost duration must be a positive number of minutes")
+
+        acknowledgement = await self._send_request(
+            session,
+            websocket,
+            gateway_id,
+            header_hi=2,
+            header_si=16,
+            args=[2, {"D": duration_minutes, "I": 4, "OT": 2, "V": 0}],
+        )
+
+        if acknowledgement not in (0, "0", None):
+            raise BeanbagWebSocketError(
+                "Unexpected Beanbag timed boost start acknowledgement: "
+                f"{acknowledgement}"
+            )
+
+    async def stop_timed_boost(
+        self,
+        session: BeanbagSession,
+        websocket: ClientWebSocketResponse,
+        gateway_id: str,
+    ) -> None:
+        """Cancel any active timed boost run."""
+
+        acknowledgement = await self._send_request(
+            session,
+            websocket,
+            gateway_id,
+            header_hi=2,
+            header_si=16,
+            args=[2, {"D": 0, "I": 4, "OT": 2, "V": 0}],
+        )
+
+        if acknowledgement not in (0, "0", None):
+            raise BeanbagWebSocketError(
+                "Unexpected Beanbag timed boost stop acknowledgement: "
                 f"{acknowledgement}"
             )
 
@@ -741,6 +803,68 @@ class BeanbagBackend:
     def _extract_timed_boost_flag(state_payload: dict[str, Any]) -> bool | None:
         """Return the timed boost enable flag from a live state payload."""
 
+        items = BeanbagBackend._extract_boost_items(state_payload)
+        if items is None:
+            return None
+
+        for item in items:
+            if item.get("I") != 27:
+                continue
+
+            value = item.get("V")
+            if value == 1:
+                return True
+            if value == 0:
+                return False
+
+        return None
+
+    @staticmethod
+    def _extract_timed_boost_active(state_payload: dict[str, Any]) -> bool | None:
+        """Return whether a timed boost run is active."""
+
+        items = BeanbagBackend._extract_boost_items(state_payload)
+        if items is None:
+            return None
+
+        for item in items:
+            if item.get("I") != 4:
+                continue
+
+            value = item.get("V")
+            if value == 1:
+                return True
+            if value == 0:
+                return False
+
+        return None
+
+    @staticmethod
+    def _extract_timed_boost_end_minute(
+        state_payload: dict[str, Any]
+    ) -> int | None:
+        """Return the minute-of-day value for the boost end time."""
+
+        items = BeanbagBackend._extract_boost_items(state_payload)
+        if items is None:
+            return None
+
+        for item in items:
+            if item.get("I") != 9:
+                continue
+
+            value = item.get("V")
+            if isinstance(value, int) and value >= 0:
+                return value
+
+        return None
+
+    @staticmethod
+    def _extract_boost_items(
+        state_payload: dict[str, Any]
+    ) -> list[dict[str, Any]] | None:
+        """Extract the boost block item list from a live state payload."""
+
         blocks = state_payload.get("V")
         if not isinstance(blocks, list):
             return None
@@ -752,20 +876,8 @@ class BeanbagBackend:
                 continue
 
             items = block.get("V")
-            if not isinstance(items, list):
-                continue
-
-            for item in items:
-                if not isinstance(item, dict):
-                    continue
-                if item.get("I") != 27:
-                    continue
-
-                value = item.get("V")
-                if value == 1:
-                    return True
-                if value == 0:
-                    return False
+            if isinstance(items, list):
+                return [item for item in items if isinstance(item, dict)]
 
         return None
 

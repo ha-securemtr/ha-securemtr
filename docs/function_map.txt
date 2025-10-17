@@ -8,6 +8,9 @@ custom_components.securemtr.__init__._async_start_backend: Authenticate with Bea
 custom_components.securemtr.__init__._async_fetch_controller: Retrieve controller metadata via the Beanbag WebSocket.
 custom_components.securemtr.__init__._build_controller: Translate metadata and gateway context into a controller object.
 custom_components.securemtr.__init__._normalize_identifier: Return a sanitized identifier candidate when possible.
+custom_components.securemtr.__init__.runtime_update_signal: Return the dispatcher signal name for runtime updates.
+custom_components.securemtr.__init__.async_dispatch_runtime_update: Notify entities that runtime state has been updated.
+custom_components.securemtr.__init__.coerce_end_time: Convert an end-minute payload into an aware datetime.
 custom_components.securemtr.config_flow.SecuremtrConfigFlow.async_step_user: Handle the initial user configuration step, enforcing the Secure Controls 12-character password limit, storing the MD5 digest, and assigning a generic entry title.
 custom_components.securemtr.beanbag.BeanbagHttpClient.login: Execute the documented Beanbag login flow while emitting sanitized diagnostics and validating the response payload.
 custom_components.securemtr.beanbag.BeanbagHttpClient._parse_gateway: Translate raw gateway payload into an object.
@@ -26,10 +29,15 @@ custom_components.securemtr.beanbag.BeanbagBackend.read_weekly_program: Return t
 custom_components.securemtr.beanbag.BeanbagBackend.turn_controller_on: Send the WebSocket command to enable the primary immersion.
 custom_components.securemtr.beanbag.BeanbagBackend.turn_controller_off: Send the WebSocket command to disable the primary immersion.
 custom_components.securemtr.beanbag.BeanbagBackend.set_timed_boost_enabled: Toggle the timed boost feature flag via the Beanbag WebSocket.
+custom_components.securemtr.beanbag.BeanbagBackend.start_timed_boost: Activate a timed boost run for the provided duration.
+custom_components.securemtr.beanbag.BeanbagBackend.stop_timed_boost: Cancel any active timed boost run.
 custom_components.securemtr.beanbag.BeanbagBackend.write_weekly_program: Send the weekly program update for the selected zone.
 custom_components.securemtr.beanbag.BeanbagBackend._set_primary_mode: Issue the documented primary mode write command.
 custom_components.securemtr.beanbag.BeanbagBackend._extract_primary_power: Return the primary power boolean from a live state payload.
 custom_components.securemtr.beanbag.BeanbagBackend._extract_timed_boost_flag: Return the timed boost enable flag from a live state payload.
+custom_components.securemtr.beanbag.BeanbagBackend._extract_timed_boost_active: Return whether a timed boost run is active.
+custom_components.securemtr.beanbag.BeanbagBackend._extract_timed_boost_end_minute: Return the minute-of-day value for the boost end time.
+custom_components.securemtr.beanbag.BeanbagBackend._extract_boost_items: Extract the boost block item list from a live state payload.
 custom_components.securemtr.beanbag.BeanbagBackend._resolve_program_index: Translate the textual zone selector into the Beanbag index.
 custom_components.securemtr.beanbag.BeanbagBackend._parse_weekly_program: Convert the Beanbag wire format into a weekly program structure.
 custom_components.securemtr.beanbag.BeanbagBackend._parse_flat_program: Interpret a flattened seven-day transition list.
@@ -48,5 +56,16 @@ custom_components.securemtr.switch.SecuremtrTimedBoostSwitch.is_on: Return wheth
 custom_components.securemtr.switch.SecuremtrTimedBoostSwitch.async_turn_on: Enable the timed boost feature in the backend.
 custom_components.securemtr.switch.SecuremtrTimedBoostSwitch.async_turn_off: Disable the timed boost feature in the backend.
 custom_components.securemtr.switch.SecuremtrTimedBoostSwitch._async_set_timed_boost: Drive the backend to the requested timed boost state.
-custom_components.securemtr.switch._slugify_identifier: Convert the controller identifier into a slug suitable for unique IDs.
-custom_components.securemtr.switch._build_device_info: Construct device registry metadata for the provided controller.
+custom_components.securemtr.button.async_setup_entry: Set up Secure Meters timed boost buttons for a config entry.
+custom_components.securemtr.button._SecuremtrBaseButton: Provide shared behaviour for Secure Meters button entities.
+custom_components.securemtr.button.SecuremtrTimedBoostButton.async_press: Send the timed boost start command for the configured duration.
+custom_components.securemtr.button.SecuremtrCancelBoostButton.available: Only expose the button while a timed boost is active.
+custom_components.securemtr.button.SecuremtrCancelBoostButton.async_press: Send the timed boost stop command.
+custom_components.securemtr.binary_sensor.async_setup_entry: Set up the Secure Meters boost binary sensor.
+custom_components.securemtr.binary_sensor._SecuremtrBaseBinarySensor: Provide shared behaviour for Secure Meters binary sensors.
+custom_components.securemtr.binary_sensor.SecuremtrBoostActiveBinarySensor.is_on: Return whether the timed boost is active.
+custom_components.securemtr.sensor.async_setup_entry: Set up the Secure Meters timed boost sensors.
+custom_components.securemtr.sensor._SecuremtrBaseSensor: Provide shared behaviour for Secure Meters sensors.
+custom_components.securemtr.sensor.SecuremtrBoostEndsSensor.native_value: Return the boost end timestamp when active.
+custom_components.securemtr.entity.slugify_identifier: Convert a controller identifier into a slug for unique IDs.
+custom_components.securemtr.entity.build_device_info: Construct device registry metadata for the provided controller.

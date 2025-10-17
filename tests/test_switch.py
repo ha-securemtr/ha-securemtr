@@ -15,10 +15,10 @@ from custom_components.securemtr import (
     SecuremtrRuntimeData,
 )
 from custom_components.securemtr.beanbag import BeanbagError
+from custom_components.securemtr.entity import slugify_identifier
 from custom_components.securemtr.switch import (
     SecuremtrPowerSwitch,
     SecuremtrTimedBoostSwitch,
-    _slugify_identifier,
     async_setup_entry,
 )
 from homeassistant.components.switch import SwitchEntity
@@ -94,7 +94,7 @@ def _create_runtime() -> tuple[SecuremtrRuntimeData, DummyBackend]:
 
 
 @pytest.mark.asyncio
-async def test_switch_setup_creates_entity() -> None:
+async def test_switch_setup_creates_entity(monkeypatch: pytest.MonkeyPatch) -> None:
     """Ensure the switch platform exposes the controller power switch."""
 
     runtime, backend = _create_runtime()
@@ -130,6 +130,11 @@ async def test_switch_setup_creates_entity() -> None:
     assert timed_switch.name == "Timed Boost"
     assert power_switch.is_on is False
     assert timed_switch.is_on is False
+
+    monkeypatch.setattr(
+        "custom_components.securemtr.switch.async_dispatch_runtime_update",
+        lambda hass_obj, entry_id: None,
+    )
 
     power_switch.hass = SimpleNamespace()
     power_switch.entity_id = "switch.securemtr_controller"
@@ -200,7 +205,7 @@ def test_switch_device_info_without_serial() -> None:
         model=None,
     )
 
-    switch = SecuremtrPowerSwitch(runtime, controller)
+    switch = SecuremtrPowerSwitch(runtime, controller, "entry")
     device_info = switch.device_info
     assert device_info["name"] == "E7+ Water Heater (controller-1)"
     assert device_info["serial_number"] is None
@@ -334,4 +339,50 @@ async def test_switch_turn_on_handles_backend_error() -> None:
 def test_slugify_identifier_generates_stable_slug() -> None:
     """Ensure the helper normalises identifiers as expected."""
 
-    assert _slugify_identifier(" Controller #1 ") == "controller__1"
+    assert slugify_identifier(" Controller #1 ") == "controller__1"
+
+
+@pytest.mark.asyncio
+async def test_switch_async_added_to_hass(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Ensure dispatcher callbacks are registered during entity setup."""
+
+    runtime, _backend = _create_runtime()
+    switch = SecuremtrPowerSwitch(runtime, runtime.controller, "entry")
+    switch.hass = SimpleNamespace()
+
+    added_calls: list[SecuremtrPowerSwitch] = []
+
+    async def _fake_added(self: SecuremtrPowerSwitch) -> None:
+        added_calls.append(self)
+
+    monkeypatch.setattr(
+        "custom_components.securemtr.switch.SwitchEntity.async_added_to_hass",
+        _fake_added,
+    )
+
+    connections: list[tuple[object, str, Any]] = []
+
+    def _connect(hass_obj: object, signal: str, callback: Any) -> Any:
+        connections.append((hass_obj, signal, callback))
+        return lambda: None
+
+    monkeypatch.setattr(
+        "custom_components.securemtr.switch.async_dispatcher_connect",
+        _connect,
+    )
+
+    removals: list[Any] = []
+
+    def _record_remove(remover: Any) -> None:
+        removals.append(remover)
+
+    switch.async_on_remove = _record_remove  # type: ignore[assignment]
+
+    await switch.async_added_to_hass()
+
+    assert added_calls
+    assert connections[0][0] is switch.hass
+    assert removals
+
+    switch.hass = None
+    await switch.async_added_to_hass()

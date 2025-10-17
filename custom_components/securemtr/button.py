@@ -1,27 +1,29 @@
-"""Switch entities for the Secure Meters water heater controller."""
+"""Button entities for Secure Meters timed boost control."""
 
 from __future__ import annotations
 
 import asyncio
+from datetime import timedelta
 import logging
 
-from homeassistant.components.switch import SwitchEntity
+from homeassistant.components.button import ButtonEntity
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
 from homeassistant.exceptions import HomeAssistantError
-from homeassistant.helpers.device_registry import DeviceInfo
 from homeassistant.helpers.dispatcher import async_dispatcher_connect
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
+from homeassistant.util import dt as dt_util
 
 from . import (
     DOMAIN,
     SecuremtrController,
     SecuremtrRuntimeData,
     async_dispatch_runtime_update,
+    coerce_end_time,
     runtime_update_signal,
 )
-from .entity import build_device_info, slugify_identifier
 from .beanbag import BeanbagError
+from .entity import build_device_info, slugify_identifier
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -33,7 +35,7 @@ async def async_setup_entry(
     entry: ConfigEntry,
     async_add_entities: AddEntitiesCallback,
 ) -> None:
-    """Set up Secure Meters switch entities for a config entry."""
+    """Set up Secure Meters timed boost buttons for a config entry."""
 
     runtime: SecuremtrRuntimeData = hass.data[DOMAIN][entry.entry_id]
 
@@ -52,14 +54,16 @@ async def async_setup_entry(
 
     async_add_entities(
         [
-            SecuremtrPowerSwitch(runtime, controller, entry.entry_id),
-            SecuremtrTimedBoostSwitch(runtime, controller, entry.entry_id),
+            SecuremtrTimedBoostButton(runtime, controller, entry.entry_id, 30),
+            SecuremtrTimedBoostButton(runtime, controller, entry.entry_id, 60),
+            SecuremtrTimedBoostButton(runtime, controller, entry.entry_id, 120),
+            SecuremtrCancelBoostButton(runtime, controller, entry.entry_id),
         ]
     )
 
 
-class _SecuremtrBaseSwitch(SwitchEntity):
-    """Provide shared behaviour for Secure Meters switch entities."""
+class _SecuremtrBaseButton(ButtonEntity):
+    """Provide shared behaviour for Secure Meters button entities."""
 
     _attr_should_poll = False
 
@@ -69,7 +73,7 @@ class _SecuremtrBaseSwitch(SwitchEntity):
         controller: SecuremtrController,
         entry_id: str,
     ) -> None:
-        """Initialise the switch with runtime context and controller metadata."""
+        """Initialise the button with runtime context and controller metadata."""
 
         self._runtime = runtime
         self._controller = controller
@@ -77,14 +81,14 @@ class _SecuremtrBaseSwitch(SwitchEntity):
 
     @property
     def available(self) -> bool:
-        """Report whether the underlying WebSocket is connected."""
+        """Report whether the controller context is currently connected."""
 
         return (
             self._runtime.websocket is not None and self._runtime.controller is not None
         )
 
     async def async_added_to_hass(self) -> None:
-        """Register runtime callbacks when the entity is added to Home Assistant."""
+        """Register dispatcher callbacks when added to Home Assistant."""
 
         await super().async_added_to_hass()
         hass = self.hass
@@ -97,8 +101,8 @@ class _SecuremtrBaseSwitch(SwitchEntity):
         self.async_on_remove(remove)
 
     @property
-    def device_info(self) -> DeviceInfo:
-        """Return device registry information for the controller."""
+    def device_info(self) -> dict[str, object]:
+        """Return device registry information for the associated controller."""
 
         return build_device_info(self._controller)
 
@@ -110,39 +114,25 @@ class _SecuremtrBaseSwitch(SwitchEntity):
         return slugify_identifier(serial_identifier)
 
 
-class SecuremtrPowerSwitch(_SecuremtrBaseSwitch):
-    """Represent a maintained power toggle for the Secure Meters controller."""
+class SecuremtrTimedBoostButton(_SecuremtrBaseButton):
+    """Trigger a timed boost run for a fixed duration."""
 
     def __init__(
         self,
         runtime: SecuremtrRuntimeData,
         controller: SecuremtrController,
         entry_id: str,
+        duration_minutes: int,
     ) -> None:
-        """Initialise the switch entity with runtime context."""
+        """Initialise the timed boost button for the requested duration."""
 
         super().__init__(runtime, controller, entry_id)
-        self._attr_unique_id = f"{self._identifier_slug()}_primary_power"
-        self._attr_name = "E7+ Controller"
+        self._duration = duration_minutes
+        self._attr_unique_id = f"{self._identifier_slug()}_boost_{duration_minutes}"
+        self._attr_name = f"Boost {duration_minutes} minutes"
 
-    @property
-    def is_on(self) -> bool:
-        """Return whether the controller reports the primary power as on."""
-
-        return self._runtime.primary_power_on is True
-
-    async def async_turn_on(self, **kwargs: object) -> None:
-        """Send an on command to the Secure Meters controller."""
-
-        await self._async_set_power_state(True)
-
-    async def async_turn_off(self, **kwargs: object) -> None:
-        """Send an off command to the Secure Meters controller."""
-
-        await self._async_set_power_state(False)
-
-    async def _async_set_power_state(self, turn_on: bool) -> None:
-        """Drive the backend to the requested primary power state."""
+    async def async_press(self) -> None:
+        """Send the timed boost start command for the configured duration."""
 
         runtime = self._runtime
         controller = runtime.controller
@@ -154,97 +144,91 @@ class SecuremtrPowerSwitch(_SecuremtrBaseSwitch):
 
         async with runtime.command_lock:
             try:
-                if turn_on:
-                    await runtime.backend.turn_controller_on(
-                        session,
-                        websocket,
-                        controller.gateway_id,
-                    )
-                else:
-                    await runtime.backend.turn_controller_off(
-                        session,
-                        websocket,
-                        controller.gateway_id,
-                    )
-            except BeanbagError as error:
-                _LOGGER.error("Failed to toggle Secure Meters controller: %s", error)
-                raise HomeAssistantError(
-                    "Failed to toggle Secure Meters controller"
-                ) from error
-
-            runtime.primary_power_on = turn_on
-
-        hass = self.hass
-        if hass is None:
-            return
-
-        self.async_write_ha_state()
-        async_dispatch_runtime_update(hass, self._entry_id)
-
-
-class SecuremtrTimedBoostSwitch(_SecuremtrBaseSwitch):
-    """Expose the timed boost feature toggle reported by Beanbag."""
-
-    def __init__(
-        self,
-        runtime: SecuremtrRuntimeData,
-        controller: SecuremtrController,
-        entry_id: str,
-    ) -> None:
-        """Initialise the timed boost switch for the controller."""
-
-        super().__init__(runtime, controller, entry_id)
-        self._attr_unique_id = f"{self._identifier_slug()}_timed_boost"
-        self._attr_name = "Timed Boost"
-
-    @property
-    def is_on(self) -> bool:
-        """Return whether timed boost is currently enabled."""
-
-        return self._runtime.timed_boost_enabled is True
-
-    async def async_turn_on(self, **kwargs: object) -> None:
-        """Enable the timed boost feature in the backend."""
-
-        await self._async_set_timed_boost(True)
-
-    async def async_turn_off(self, **kwargs: object) -> None:
-        """Disable the timed boost feature in the backend."""
-
-        await self._async_set_timed_boost(False)
-
-    async def _async_set_timed_boost(self, enabled: bool) -> None:
-        """Drive the backend to the requested timed boost state."""
-
-        runtime = self._runtime
-        controller = runtime.controller
-        session = runtime.session
-        websocket = runtime.websocket
-
-        if controller is None or session is None or websocket is None:
-            raise HomeAssistantError("Secure Meters controller is not connected")
-
-        async with runtime.command_lock:
-            try:
-                await runtime.backend.set_timed_boost_enabled(
+                await runtime.backend.start_timed_boost(
                     session,
                     websocket,
                     controller.gateway_id,
-                    enabled=enabled,
+                    duration_minutes=self._duration,
                 )
-            except BeanbagError as error:
-                _LOGGER.error(
-                    "Failed to toggle Secure Meters timed boost feature: %s", error
-                )
+            except (BeanbagError, ValueError) as error:
+                _LOGGER.error("Failed to start Secure Meters timed boost: %s", error)
                 raise HomeAssistantError(
-                    "Failed to toggle Secure Meters timed boost feature"
+                    "Failed to start Secure Meters timed boost"
                 ) from error
 
-            runtime.timed_boost_enabled = enabled
+            runtime.timed_boost_active = True
+            now_local = dt_util.now()
+            end_local = now_local + timedelta(minutes=self._duration)
+            runtime.timed_boost_end_minute = end_local.hour * 60 + end_local.minute
+            runtime.timed_boost_end_time = coerce_end_time(
+                runtime.timed_boost_end_minute
+            )
 
         hass = self.hass
         if hass is None:
             return
 
-        self.async_write_ha_state()
         async_dispatch_runtime_update(hass, self._entry_id)
+
+
+class SecuremtrCancelBoostButton(_SecuremtrBaseButton):
+    """Cancel an active timed boost run."""
+
+    def __init__(
+        self,
+        runtime: SecuremtrRuntimeData,
+        controller: SecuremtrController,
+        entry_id: str,
+    ) -> None:
+        """Initialise the timed boost cancellation button."""
+
+        super().__init__(runtime, controller, entry_id)
+        self._attr_unique_id = f"{self._identifier_slug()}_boost_cancel"
+        self._attr_name = "Cancel Boost"
+
+    @property
+    def available(self) -> bool:
+        """Only expose the button while a timed boost is active."""
+
+        return super().available and self._runtime.timed_boost_active is True
+
+    async def async_press(self) -> None:
+        """Send the timed boost stop command."""
+
+        runtime = self._runtime
+        controller = runtime.controller
+        session = runtime.session
+        websocket = runtime.websocket
+
+        if controller is None or session is None or websocket is None:
+            raise HomeAssistantError("Secure Meters controller is not connected")
+
+        if runtime.timed_boost_active is not True:
+            raise HomeAssistantError("Timed boost is not currently active")
+
+        async with runtime.command_lock:
+            try:
+                await runtime.backend.stop_timed_boost(
+                    session, websocket, controller.gateway_id
+                )
+            except BeanbagError as error:
+                _LOGGER.error("Failed to cancel Secure Meters timed boost: %s", error)
+                raise HomeAssistantError(
+                    "Failed to cancel Secure Meters timed boost"
+                ) from error
+
+            runtime.timed_boost_active = False
+            runtime.timed_boost_end_minute = None
+            runtime.timed_boost_end_time = None
+
+        hass = self.hass
+        if hass is None:
+            return
+
+        async_dispatch_runtime_update(hass, self._entry_id)
+
+
+__all__ = [
+    "SecuremtrTimedBoostButton",
+    "SecuremtrCancelBoostButton",
+]

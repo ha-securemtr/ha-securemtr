@@ -690,7 +690,14 @@ async def test_backend_read_live_state_parses_primary_power(
                 "R": {
                     "V": [
                         {"SI": 33, "V": [{"I": 6, "V": 0}]},
-                        {"SI": 16, "V": [{"I": 27, "V": 1}]},
+                        {
+                            "SI": 16,
+                            "V": [
+                                {"I": 4, "V": 1},
+                                {"I": 9, "V": 600},
+                                {"I": 27, "V": 1},
+                            ],
+                        },
                     ]
                 },
             }
@@ -707,10 +714,19 @@ async def test_backend_read_live_state_parses_primary_power(
 
     assert snapshot.primary_power_on is False
     assert snapshot.timed_boost_enabled is True
+    assert snapshot.timed_boost_active is True
+    assert snapshot.timed_boost_end_minute == 600
     assert snapshot.payload == {
         "V": [
             {"SI": 33, "V": [{"I": 6, "V": 0}]},
-            {"SI": 16, "V": [{"I": 27, "V": 1}]},
+            {
+                "SI": 16,
+                "V": [
+                    {"I": 4, "V": 1},
+                    {"I": 9, "V": 600},
+                    {"I": 27, "V": 1},
+                ],
+            },
         ]
     }
     assert websocket.sent[0]["P"][0] == {"GMI": "gateway-1", "HI": 3, "SI": 1}
@@ -848,6 +864,124 @@ async def test_backend_set_timed_boost_ack_error(
         )
 
 
+@pytest.mark.asyncio
+async def test_backend_start_timed_boost(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Verify timed boost start commands use the documented payload."""
+
+    backend = BeanbagBackend(Mock())
+    send = AsyncMock(return_value=0)
+    monkeypatch.setattr(backend, "_send_request", send)
+
+    session_data = BeanbagSession(
+        user_id=1,
+        session_id="abc",
+        token="jwt",
+        token_timestamp=None,
+        gateways=(),
+    )
+    websocket = Mock()
+
+    await backend.start_timed_boost(
+        session_data, websocket, "gateway-1", duration_minutes=90
+    )
+
+    assert send.await_args_list[0].kwargs == {
+        "header_hi": 2,
+        "header_si": 16,
+        "args": [2, {"D": 90, "I": 4, "OT": 2, "V": 0}],
+    }
+
+
+@pytest.mark.asyncio
+async def test_backend_start_timed_boost_invalid_duration() -> None:
+    """Reject zero or negative boost durations."""
+
+    backend = BeanbagBackend(Mock())
+    session_data = BeanbagSession(
+        user_id=1,
+        session_id="abc",
+        token="jwt",
+        token_timestamp=None,
+        gateways=(),
+    )
+
+    with pytest.raises(ValueError):
+        await backend.start_timed_boost(
+            session_data, Mock(), "gateway-1", duration_minutes=0
+        )
+
+
+@pytest.mark.asyncio
+async def test_backend_start_timed_boost_ack_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Raise when the timed boost start acknowledgement is unexpected."""
+
+    backend = BeanbagBackend(Mock())
+    send = AsyncMock(return_value=5)
+    monkeypatch.setattr(backend, "_send_request", send)
+
+    session_data = BeanbagSession(
+        user_id=1,
+        session_id="abc",
+        token="jwt",
+        token_timestamp=None,
+        gateways=(),
+    )
+
+    with pytest.raises(BeanbagWebSocketError):
+        await backend.start_timed_boost(
+            session_data, Mock(), "gateway-1", duration_minutes=30
+        )
+
+
+@pytest.mark.asyncio
+async def test_backend_stop_timed_boost(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Verify the cancel command issues the documented payload."""
+
+    backend = BeanbagBackend(Mock())
+    send = AsyncMock(return_value=0)
+    monkeypatch.setattr(backend, "_send_request", send)
+
+    session_data = BeanbagSession(
+        user_id=1,
+        session_id="abc",
+        token="jwt",
+        token_timestamp=None,
+        gateways=(),
+    )
+
+    await backend.stop_timed_boost(session_data, Mock(), "gateway-1")
+
+    assert send.await_args_list[0].kwargs == {
+        "header_hi": 2,
+        "header_si": 16,
+        "args": [2, {"D": 0, "I": 4, "OT": 2, "V": 0}],
+    }
+
+
+@pytest.mark.asyncio
+async def test_backend_stop_timed_boost_ack_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Raise when the timed boost stop acknowledgement is unexpected."""
+
+    backend = BeanbagBackend(Mock())
+    send = AsyncMock(return_value="oops")
+    monkeypatch.setattr(backend, "_send_request", send)
+
+    session_data = BeanbagSession(
+        user_id=1,
+        session_id="abc",
+        token="jwt",
+        token_timestamp=None,
+        gateways=(),
+    )
+
+    with pytest.raises(BeanbagWebSocketError):
+        await backend.stop_timed_boost(session_data, Mock(), "gateway-1")
+
+
 def test_extract_timed_boost_flag_edge_cases() -> None:
     """Exercise edge cases in the timed boost extractor."""
 
@@ -868,6 +1002,48 @@ def test_extract_timed_boost_flag_edge_cases() -> None:
         backend._extract_timed_boost_flag({"V": [{"SI": 16, "V": [{"I": 27, "V": 0}]}]})
         is False
     )
+
+
+def test_extract_timed_boost_state_helpers() -> None:
+    """Exercise the boost state helper extractors."""
+
+    backend = BeanbagBackend(Mock())
+    payload = {
+        "V": [
+            {
+                "SI": 16,
+                "V": [
+                    {"I": 5, "V": 1},
+                    {"I": 4, "V": 1},
+                    {"I": 9, "V": 615},
+                    {"I": 27, "V": 1},
+                ],
+            }
+        ]
+    }
+
+    assert backend._extract_timed_boost_active(payload) is True
+    assert backend._extract_timed_boost_end_minute(payload) == 615
+    assert (
+        backend._extract_timed_boost_active(
+            {"V": [{"SI": 16, "V": [{"I": 4, "V": 0}]}]}
+        )
+        is False
+    )
+    assert (
+        backend._extract_timed_boost_active(
+            {"V": [{"SI": 16, "V": [{"I": 4, "V": 7}]}]}
+        )
+        is None
+    )
+    assert (
+        backend._extract_timed_boost_end_minute(
+            {"V": [{"SI": 16, "V": [{"I": 9, "V": "oops"}]}]}
+        )
+        is None
+    )
+    assert backend._extract_timed_boost_active({}) is None
+    assert backend._extract_timed_boost_end_minute({}) is None
 
 
 @pytest.mark.asyncio

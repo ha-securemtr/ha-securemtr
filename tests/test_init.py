@@ -15,8 +15,11 @@ from custom_components.securemtr import (
     _entry_display_name,
     _async_fetch_controller,
     _build_controller,
+    async_dispatch_runtime_update,
+    coerce_end_time,
     async_setup_entry,
     async_unload_entry,
+    runtime_update_signal,
 )
 from custom_components.securemtr.beanbag import (
     BeanbagError,
@@ -145,13 +148,23 @@ class FakeBeanbagBackend:
         payload = {
             "V": [
                 {"I": 1, "SI": 33, "V": [{"I": 6, "V": 2}]},
-                {"I": 2, "SI": 16, "V": [{"I": 27, "V": 0}]},
+                {
+                    "I": 2,
+                    "SI": 16,
+                    "V": [
+                        {"I": 4, "V": 0},
+                        {"I": 9, "V": 0},
+                        {"I": 27, "V": 0},
+                    ],
+                },
             ]
         }
         return BeanbagStateSnapshot(
             payload=payload,
             primary_power_on=True,
             timed_boost_enabled=False,
+            timed_boost_active=False,
+            timed_boost_end_minute=None,
         )
 
     async def turn_controller_on(
@@ -270,9 +283,17 @@ async def test_async_setup_entry_starts_backend(
     assert runtime.state_snapshot is not None
     assert runtime.state_snapshot.primary_power_on is True
     assert runtime.state_snapshot.timed_boost_enabled is False
+    assert runtime.state_snapshot.timed_boost_active is False
+    assert runtime.state_snapshot.timed_boost_end_minute is None
     assert runtime.primary_power_on is True
     assert runtime.timed_boost_enabled is False
-    assert hass.config_entries.forwarded == [("switch",)]
+    assert runtime.timed_boost_active is False
+    assert runtime.timed_boost_end_minute is None
+    assert runtime.timed_boost_end_time is None
+    assert hass.config_entries.forwarded == [
+        ("switch",),
+        ("button", "binary_sensor", "sensor"),
+    ]
 
 
 @pytest.mark.asyncio
@@ -518,7 +539,9 @@ async def test_async_unload_entry_cleans_up(monkeypatch: pytest.MonkeyPatch) -> 
     assert backend.websocket.close_calls == 1
     await asyncio.sleep(0)
     assert runtime.startup_task.cancelled()
-    assert hass.config_entries.unloaded == [("switch",)]
+    assert hass.config_entries.unloaded == [
+        ("switch", "button", "binary_sensor", "sensor")
+    ]
 
 
 @pytest.mark.asyncio
@@ -643,6 +666,38 @@ async def test_async_fetch_controller_requires_connection() -> None:
 
     with pytest.raises(BeanbagError):
         await _async_fetch_controller(entry, runtime)
+
+
+def test_runtime_update_signal_helper() -> None:
+    """Ensure the runtime update signal embeds the entry id."""
+
+    assert runtime_update_signal("entry") == "securemtr_runtime_update_entry"
+
+
+def test_async_dispatch_runtime_update_helper(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Ensure runtime updates emit the expected dispatcher signal."""
+
+    calls: list[tuple[object, str]] = []
+
+    def _fake_dispatch(hass_obj: object, signal: str) -> None:
+        calls.append((hass_obj, signal))
+
+    monkeypatch.setattr(
+        "custom_components.securemtr.async_dispatcher_send", _fake_dispatch
+    )
+
+    hass = SimpleNamespace()
+    async_dispatch_runtime_update(hass, "entry")
+
+    assert calls == [(hass, "securemtr_runtime_update_entry")]
+
+
+def test_coerce_end_time_invalid_inputs() -> None:
+    """Reject invalid end-minute payloads."""
+
+    assert coerce_end_time(None) is None
+    assert coerce_end_time(-1) is None
+    assert coerce_end_time("oops") is None
 
 
 def test_build_controller_normalises_metadata() -> None:

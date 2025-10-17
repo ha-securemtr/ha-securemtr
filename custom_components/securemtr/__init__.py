@@ -6,6 +6,7 @@ import asyncio
 from contextlib import suppress
 from dataclasses import dataclass, field
 import logging
+from datetime import datetime, timedelta
 from typing import Any
 
 from aiohttp import ClientWebSocketResponse
@@ -13,6 +14,8 @@ from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import CONF_EMAIL, CONF_PASSWORD
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
+from homeassistant.helpers.dispatcher import async_dispatcher_send
+from homeassistant.util import dt as dt_util
 
 from .beanbag import (
     BeanbagBackend,
@@ -23,6 +26,8 @@ from .beanbag import (
 )
 
 DOMAIN = "securemtr"
+
+_RUNTIME_UPDATE_SIGNAL = "securemtr_runtime_update"
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -40,6 +45,9 @@ class SecuremtrRuntimeData:
     command_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
     primary_power_on: bool | None = None
     timed_boost_enabled: bool | None = None
+    timed_boost_active: bool | None = None
+    timed_boost_end_minute: int | None = None
+    timed_boost_end_time: datetime | None = None
     zone_topology: list[dict[str, Any]] | None = None
     schedule_overview: dict[str, Any] | None = None
     device_metadata: dict[str, Any] | None = None
@@ -85,9 +93,12 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     config_entries_helper = getattr(hass, "config_entries", None)
     if config_entries_helper is not None:
         await config_entries_helper.async_forward_entry_setups(entry, ["switch"])
+        await config_entries_helper.async_forward_entry_setups(
+            entry, ["button", "binary_sensor", "sensor"]
+        )
     else:
         _LOGGER.debug(
-            "config_entries helper unavailable; skipping switch platform setup for %s",
+            "config_entries helper unavailable; skipping platform setup for %s",
             entry_identifier,
         )
 
@@ -106,12 +117,12 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     config_entries_helper = getattr(hass, "config_entries", None)
     if config_entries_helper is not None:
         unload_ok = await config_entries_helper.async_unload_platforms(
-            entry, ["switch"]
+            entry, ["switch", "button", "binary_sensor", "sensor"]
         )
     else:
         unload_ok = True
         _LOGGER.debug(
-            "config_entries helper unavailable; skipping switch platform unload for %s",
+            "config_entries helper unavailable; skipping platform unload for %s",
             entry_identifier,
         )
 
@@ -248,8 +259,40 @@ async def _async_fetch_controller(
     runtime.state_snapshot = state_snapshot
     runtime.primary_power_on = state_snapshot.primary_power_on
     runtime.timed_boost_enabled = state_snapshot.timed_boost_enabled
+    runtime.timed_boost_active = state_snapshot.timed_boost_active
+    runtime.timed_boost_end_minute = state_snapshot.timed_boost_end_minute
+    runtime.timed_boost_end_time = coerce_end_time(state_snapshot.timed_boost_end_minute)
 
     return _build_controller(metadata, gateway)
+
+
+def runtime_update_signal(entry_id: str) -> str:
+    """Return the dispatcher signal name for runtime updates."""
+
+    return f"{_RUNTIME_UPDATE_SIGNAL}_{entry_id}"
+
+
+def async_dispatch_runtime_update(hass: HomeAssistant, entry_id: str) -> None:
+    """Notify entities that runtime state has been updated."""
+
+    async_dispatcher_send(hass, runtime_update_signal(entry_id))
+
+
+def coerce_end_time(end_minute: int | None) -> datetime | None:
+    """Convert an end-minute payload into an aware datetime."""
+
+    if end_minute is None:
+        return None
+
+    if not isinstance(end_minute, int) or end_minute < 0:
+        return None
+
+    now_local = dt_util.now()
+    midnight = now_local.replace(hour=0, minute=0, second=0, microsecond=0)
+    candidate = midnight + timedelta(minutes=end_minute)
+    if candidate <= now_local:
+        candidate += timedelta(days=1)
+    return dt_util.as_utc(candidate)
 
 
 def _build_controller(

@@ -21,3 +21,23 @@
 - Accidental spaces before or after your email address are trimmed during login so credentials match what the Secure Controls app expects.
 
 *_Disclaimer: This repository is not in any way affiliated with Secure Meters (UK), the Secure Controls system, Home Assistant or other referenced entities. This is an open community project to allow customers to use their electric water heater controllers with their own authorized credentials. Use at your own risk._*
+
+## Timed boost controls
+
+You now have four buttons in Home Assistant for quick boost actions:
+
+- **Boost 30 minutes**
+- **Boost 60 minutes**
+- **Boost 120 minutes**
+- **Cancel Boost** (only shown while a boost is running)
+
+Tap a button on your dashboard, call it from the Services panel, or trigger it in an automation whenever you want hot water without opening the Secure Controls app.
+
+## Timed boost sensors
+
+Two new sensors help you see what the heater is doing:
+
+- **Boost Active** shows if a boost is running right now.
+- **Boost Ends** counts down to when the current boost will switch off.
+
+Add them to a dashboard card or use them in automations—for example, to skip starting another boost while one is already underway.
