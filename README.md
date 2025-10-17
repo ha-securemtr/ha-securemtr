@@ -21,8 +21,6 @@ Control your **Secure Meters E7+ Smart Water Heater Controller** from **Home Ass
 
 > Install the integration (via HACS or manual copy) before you use the “Add integration” button.
 
----
-
 ## Who is this for?
 
 For anyone using the **E7+ Wifi-enabled Smart Water Heater Controller** from Secure Meters. If you already manage your water heater with the Secure Controls mobile app and want the same control inside Home Assistant, this add-on is for you.
@@ -82,6 +80,27 @@ For anyone using the **E7+ Wifi-enabled Smart Water Heater Controller** from Sec
 - **Schedule around tariffs:** Align the weekly heating timetable with your off-peak electricity rates for lower bills.
 - **Energy tracking:** Add the energy sensors to Home Assistant’s Energy Dashboard to see usage trends and cost estimates.
 
+---
+
+## Timed boost controls
+
+You now have four buttons in Home Assistant for quick boost actions:
+
+- **Boost 30 minutes**
+- **Boost 60 minutes**
+- **Boost 120 minutes**
+- **Cancel Boost** (only shown while a boost is running)
+
+Tap a button on your dashboard, call it from the Services panel, or trigger it in an automation whenever you want hot water without opening the Secure Controls app.
+
+## Timed boost sensors
+
+Two new sensors help you see what the heater is doing:
+
+- **Boost Active** shows if a boost is running right now.
+- **Boost Ends** counts down to when the current boost will switch off.
+
+Add them to a dashboard card or use them in automations—for example, to skip starting another boost while one is already underway.
 ---
 
 ## Troubleshooting
