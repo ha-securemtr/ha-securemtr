@@ -26,7 +26,6 @@ from . import (
 )
 from .beanbag import BeanbagError
 from .entity import build_device_info, slugify_identifier
-from .switch import _build_device_info, _slugify_identifier
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -57,23 +56,17 @@ async def async_setup_entry(
 
     async_add_entities(
         [
-            SecuremtrTimedBoostButton(runtime, controller, entry.entry_id, 30),
-            SecuremtrTimedBoostButton(runtime, controller, entry.entry_id, 60),
-            SecuremtrTimedBoostButton(runtime, controller, entry.entry_id, 120),
-            SecuremtrCancelBoostButton(runtime, controller, entry.entry_id),
-            SecuremtrConsumptionMetricsButton(runtime, controller, entry.entry_id),
+            SecuremtrTimedBoostButton(runtime, controller, entry, 30),
+            SecuremtrTimedBoostButton(runtime, controller, entry, 60),
+            SecuremtrTimedBoostButton(runtime, controller, entry, 120),
+            SecuremtrCancelBoostButton(runtime, controller, entry),
+            SecuremtrConsumptionMetricsButton(runtime, controller, entry),
         ]
     )
 
 
 class _SecuremtrBaseButton(ButtonEntity):
     """Provide shared behaviour for Secure Meters button entities."""
-        [SecuremtrConsumptionMetricsButton(hass, entry, runtime, controller)]
-    )
-
-    
-class SecuremtrConsumptionMetricsButton(ButtonEntity):
-    """Trigger a manual refresh of Secure Meters consumption metrics."""
 
     _attr_should_poll = False
 
@@ -81,13 +74,14 @@ class SecuremtrConsumptionMetricsButton(ButtonEntity):
         self,
         runtime: SecuremtrRuntimeData,
         controller: SecuremtrController,
-        entry_id: str,
+        entry: ConfigEntry,
     ) -> None:
         """Initialise the button with runtime context and controller metadata."""
 
         self._runtime = runtime
         self._controller = controller
-        self._entry_id = entry_id
+        self._entry = entry
+        self._entry_id = entry.entry_id
 
     @property
     def available(self) -> bool:
@@ -111,7 +105,7 @@ class SecuremtrConsumptionMetricsButton(ButtonEntity):
         self.async_on_remove(remove)
 
     @property
-    def device_info(self) -> dict[str, object]:
+    def device_info(self) -> DeviceInfo:
         """Return device registry information for the associated controller."""
 
         return build_device_info(self._controller)
@@ -124,6 +118,32 @@ class SecuremtrConsumptionMetricsButton(ButtonEntity):
         return slugify_identifier(serial_identifier)
 
 
+class SecuremtrConsumptionMetricsButton(_SecuremtrBaseButton):
+    """Trigger a manual refresh of Secure Meters consumption metrics."""
+
+    def __init__(
+        self,
+        runtime: SecuremtrRuntimeData,
+        controller: SecuremtrController,
+        entry: ConfigEntry,
+    ) -> None:
+        """Initialise the consumption metrics button for the controller."""
+
+        super().__init__(runtime, controller, entry)
+        slug = self._identifier_slug()
+        self._attr_unique_id = f"{slug}_refresh_consumption"
+        self._attr_name = "Refresh Consumption Metrics"
+
+    async def async_press(self) -> None:
+        """Trigger an on-demand refresh of consumption metrics."""
+
+        hass = self.hass
+        if hass is None:
+            raise HomeAssistantError("Home Assistant instance is not available")
+
+        await consumption_metrics(hass, self._entry)
+
+
 class SecuremtrTimedBoostButton(_SecuremtrBaseButton):
     """Trigger a timed boost run for a fixed duration."""
 
@@ -131,12 +151,12 @@ class SecuremtrTimedBoostButton(_SecuremtrBaseButton):
         self,
         runtime: SecuremtrRuntimeData,
         controller: SecuremtrController,
-        entry_id: str,
+        entry: ConfigEntry,
         duration_minutes: int,
     ) -> None:
         """Initialise the timed boost button for the requested duration."""
 
-        super().__init__(runtime, controller, entry_id)
+        super().__init__(runtime, controller, entry)
         self._duration = duration_minutes
         self._attr_unique_id = f"{self._identifier_slug()}_boost_{duration_minutes}"
         self._attr_name = f"Boost {duration_minutes} minutes"
@@ -188,11 +208,11 @@ class SecuremtrCancelBoostButton(_SecuremtrBaseButton):
         self,
         runtime: SecuremtrRuntimeData,
         controller: SecuremtrController,
-        entry_id: str,
+        entry: ConfigEntry,
     ) -> None:
         """Initialise the timed boost cancellation button."""
 
-        super().__init__(runtime, controller, entry_id)
+        super().__init__(runtime, controller, entry)
         self._attr_unique_id = f"{self._identifier_slug()}_boost_cancel"
         self._attr_name = "Cancel Boost"
 

@@ -1,7 +1,10 @@
+"""Tests for the Secure Meters button platform."""
+
+from __future__ import annotations
+
 import asyncio
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from dataclasses import dataclass
 from types import SimpleNamespace
 from typing import Any
 
@@ -16,21 +19,17 @@ from custom_components.securemtr import (
 from custom_components.securemtr.beanbag import BeanbagError
 from custom_components.securemtr.button import (
     SecuremtrCancelBoostButton,
+    SecuremtrConsumptionMetricsButton,
     SecuremtrTimedBoostButton,
     async_setup_entry,
 )
 from homeassistant.components.button import ButtonEntity
-from custom_components.securemtr import DOMAIN, SecuremtrController, SecuremtrRuntimeData
-from custom_components.securemtr.button import (
-    SecuremtrConsumptionMetricsButton,
-    async_setup_entry,
-)
 from homeassistant.exceptions import HomeAssistantError
 
 
 @dataclass(slots=True)
 class DummyEntry:
-    """Provide the minimal entry attributes for setup."""
+    """Provide the minimal config entry attributes for setup."""
 
     entry_id: str
 
@@ -67,16 +66,6 @@ def _create_runtime() -> tuple[SecuremtrRuntimeData, DummyBackend]:
 
     backend = DummyBackend()
     runtime = SecuremtrRuntimeData(backend=backend)
-    """Stub backend for button tests."""
-
-    async def read_device_metadata(self, *args: Any, **kwargs: Any) -> None:  # pragma: no cover
-        """Unused backend stub."""
-
-
-def _create_runtime() -> SecuremtrRuntimeData:
-    """Create runtime data with a ready controller."""
-
-    runtime = SecuremtrRuntimeData(backend=DummyBackend())
     runtime.session = SimpleNamespace()
     runtime.websocket = SimpleNamespace()
     runtime.controller = SecuremtrController(
@@ -96,7 +85,7 @@ def _create_runtime() -> SecuremtrRuntimeData:
 async def test_button_setup_creates_entities() -> None:
     """Ensure the button platform exposes the configured commands."""
 
-    runtime, backend = _create_runtime()
+    runtime, _backend = _create_runtime()
     hass = SimpleNamespace(data={DOMAIN: {"entry": runtime}})
     entry = DummyEntry(entry_id="entry")
     entities: list[ButtonEntity] = []
@@ -111,6 +100,7 @@ async def test_button_setup_creates_entities() -> None:
         "serial_1_boost_60",
         "serial_1_boost_120",
         "serial_1_boost_cancel",
+        "serial_1_refresh_consumption",
     }
 
     cancel_button = next(
@@ -118,6 +108,12 @@ async def test_button_setup_creates_entities() -> None:
     )
     assert isinstance(cancel_button, SecuremtrCancelBoostButton)
     assert cancel_button.available is False
+
+    metrics_button = next(
+        entity for entity in entities if entity.unique_id.endswith("refresh_consumption")
+    )
+    assert isinstance(metrics_button, SecuremtrConsumptionMetricsButton)
+
     boost_button = next(
         entity for entity in entities if entity.unique_id.endswith("boost_60")
     )
@@ -355,7 +351,7 @@ async def test_button_async_added_to_hass(monkeypatch: pytest.MonkeyPatch) -> No
     """Ensure dispatcher callbacks are registered when the entity is added."""
 
     runtime, _backend = _create_runtime()
-    button = SecuremtrTimedBoostButton(runtime, runtime.controller, "entry", 30)
+    button = SecuremtrTimedBoostButton(runtime, runtime.controller, DummyEntry("entry"), 30)
     button.hass = SimpleNamespace()
 
     added_calls: list[SecuremtrTimedBoostButton] = []
@@ -393,3 +389,32 @@ async def test_button_async_added_to_hass(monkeypatch: pytest.MonkeyPatch) -> No
 
     button.hass = None
     await button.async_added_to_hass()
+
+
+@pytest.mark.asyncio
+async def test_consumption_button_triggers_refresh(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Ensure pressing the consumption button refreshes metrics."""
+
+    runtime, _backend = _create_runtime()
+    hass = SimpleNamespace()
+    entry = DummyEntry(entry_id="entry")
+    button = SecuremtrConsumptionMetricsButton(runtime, runtime.controller, entry)
+    button.hass = hass
+
+    calls: list[tuple[object, DummyEntry]] = []
+
+    async def _fake_refresh(hass_obj: object, entry_obj: DummyEntry) -> None:
+        calls.append((hass_obj, entry_obj))
+
+    monkeypatch.setattr(
+        "custom_components.securemtr.button.consumption_metrics", _fake_refresh
+    )
+
+    await button.async_press()
+
+    assert calls == [(hass, entry)]
+
+    button.hass = None
+    with pytest.raises(HomeAssistantError):
+        await button.async_press()
+
