@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from homeassistant.helpers.device_registry import DeviceInfo
 
-from . import DOMAIN, SecuremtrController
+from . import DEFAULT_DEVICE_LABEL, DOMAIN, SecuremtrController
 
 
 def slugify_identifier(identifier: str) -> str:
@@ -20,12 +20,7 @@ def build_device_info(controller: SecuremtrController) -> DeviceInfo:
     """Construct device registry metadata for the provided controller."""
 
     serial_identifier = controller.serial_number or controller.identifier
-    serial_display = controller.serial_number or serial_identifier
-    device_name = (
-        f"E7+ Water Heater (SN: {serial_display})"
-        if controller.serial_number
-        else f"E7+ Water Heater ({serial_display})"
-    )
+    device_name = DEFAULT_DEVICE_LABEL
     return DeviceInfo(
         identifiers={(DOMAIN, serial_identifier)},
         manufacturer="Secure Meters",

@@ -30,6 +30,8 @@ from .beanbag import (
 
 DOMAIN = "securemtr"
 
+DEFAULT_DEVICE_LABEL = "E7+ Smart Water Heater Controller"
+
 _RUNTIME_UPDATE_SIGNAL = "securemtr_runtime_update"
 
 _LOGGER = logging.getLogger(__name__)
@@ -404,12 +406,7 @@ def _build_controller(
     else:
         candidate_name = ""
 
-    serial_display = serial_number or identifier
-    default_name = (
-        f"E7+ Water Heater (SN: {serial_number})"
-        if serial_number
-        else f"E7+ Water Heater ({serial_display})"
-    )
+    default_name = DEFAULT_DEVICE_LABEL
 
     name = (
         candidate_name
