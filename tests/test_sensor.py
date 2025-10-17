@@ -7,8 +7,18 @@ from typing import Any
 import pytest
 
 from custom_components.securemtr import DOMAIN, SecuremtrController, SecuremtrRuntimeData
-from custom_components.securemtr.sensor import SecuremtrBoostEndsSensor, async_setup_entry
-from homeassistant.components.sensor import SensorEntity
+from custom_components.securemtr.sensor import (
+    SecuremtrBoostEndsSensor,
+    SecuremtrDailyDurationSensor,
+    SecuremtrEnergyTotalSensor,
+    async_setup_entry,
+)
+from homeassistant.components.sensor import (
+    SensorDeviceClass,
+    SensorEntity,
+    SensorStateClass,
+)
+from homeassistant.const import UnitOfEnergy, UnitOfTime
 from homeassistant.exceptions import HomeAssistantError
 
 
@@ -57,9 +67,11 @@ async def test_sensor_reports_end_time() -> None:
 
     await async_setup_entry(hass, entry, entities.extend)
 
-    assert len(entities) == 1
-    sensor = entities[0]
-    assert isinstance(sensor, SecuremtrBoostEndsSensor)
+    sensor = next(
+        entity
+        for entity in entities
+        if isinstance(entity, SecuremtrBoostEndsSensor)
+    )
     assert sensor.unique_id == "serial_1_boost_ends"
     assert sensor.native_value is None
     assert (
@@ -122,6 +134,96 @@ async def test_sensor_requires_controller() -> None:
 
     with pytest.raises(HomeAssistantError):
         await async_setup_entry(hass, entry, lambda entities: None)
+
+
+@pytest.mark.asyncio
+async def test_statistics_sensors_report_totals() -> None:
+    """Ensure the statistics sensors expose cumulative and daily values."""
+
+    runtime = _create_runtime()
+    runtime.statistics_state = {
+        "primary": {"energy_sum": 12.5, "last_day": "2024-03-01"},
+        "boost": {"energy_sum": 4.75, "last_day": "2024-03-01"},
+    }
+    runtime.statistics_recent = {
+        "primary": {
+            "report_day": "2024-03-01",
+            "runtime_hours": 3.25,
+            "scheduled_hours": 4.0,
+            "energy_sum": 12.5,
+        },
+        "boost": {
+            "report_day": "2024-03-01",
+            "runtime_hours": 0.5,
+            "scheduled_hours": 1.0,
+            "energy_sum": 4.75,
+        },
+    }
+
+    hass = SimpleNamespace(data={DOMAIN: {"entry": runtime}})
+    entry = DummyEntry(entry_id="entry")
+    entities: list[SensorEntity] = []
+
+    await async_setup_entry(hass, entry, entities.extend)
+
+    assert len(entities) == 7
+    sensors_by_id = {entity.unique_id: entity for entity in entities}
+
+    primary_energy = sensors_by_id["serial_1_primary_energy_total"]
+    assert isinstance(primary_energy, SecuremtrEnergyTotalSensor)
+    assert primary_energy.native_value == pytest.approx(12.5)
+    assert (
+        primary_energy.native_unit_of_measurement
+        == UnitOfEnergy.KILO_WATT_HOUR
+    )
+    assert primary_energy.device_class is SensorDeviceClass.ENERGY
+    assert primary_energy.state_class is SensorStateClass.TOTAL_INCREASING
+    assert primary_energy.extra_state_attributes == {
+        "last_report_day": "2024-03-01"
+    }
+
+    boost_energy = sensors_by_id["serial_1_boost_energy_total"]
+    assert isinstance(boost_energy, SecuremtrEnergyTotalSensor)
+    assert boost_energy.native_value == pytest.approx(4.75)
+    assert boost_energy.extra_state_attributes == {
+        "last_report_day": "2024-03-01"
+    }
+
+    primary_runtime = sensors_by_id["serial_1_primary_runtime_daily"]
+    assert isinstance(primary_runtime, SecuremtrDailyDurationSensor)
+    assert primary_runtime.native_value == pytest.approx(3.25)
+    assert primary_runtime.native_unit_of_measurement == UnitOfTime.HOURS
+    assert primary_runtime.device_class is SensorDeviceClass.DURATION
+    assert primary_runtime.state_class is SensorStateClass.MEASUREMENT
+    primary_runtime_attrs = primary_runtime.extra_state_attributes
+    assert primary_runtime_attrs is not None
+    assert primary_runtime_attrs["report_day"] == "2024-03-01"
+    assert primary_runtime_attrs["energy_total_kwh"] == pytest.approx(12.5)
+
+    boost_runtime = sensors_by_id["serial_1_boost_runtime_daily"]
+    assert boost_runtime.native_value == pytest.approx(0.5)
+
+    primary_scheduled = sensors_by_id["serial_1_primary_scheduled_daily"]
+    assert primary_scheduled.native_value == pytest.approx(4.0)
+    primary_scheduled_attrs = primary_scheduled.extra_state_attributes
+    assert primary_scheduled_attrs is not None
+    assert primary_scheduled_attrs["report_day"] == "2024-03-01"
+    assert primary_scheduled_attrs["energy_total_kwh"] == pytest.approx(12.5)
+
+    runtime.statistics_state = {"boost": {"energy_sum": "invalid", "last_day": 123}}
+    assert boost_energy.native_value is None
+    assert boost_energy.extra_state_attributes is None
+
+    runtime.statistics_state = None
+    assert boost_energy.native_value is None
+    assert boost_energy.extra_state_attributes is None
+
+    runtime.statistics_recent = {"boost": {"runtime_hours": "invalid"}}
+    assert boost_runtime.native_value is None
+
+    runtime.statistics_recent = None
+    assert boost_runtime.native_value is None
+    assert boost_runtime.extra_state_attributes is None
 
 
 @pytest.mark.asyncio

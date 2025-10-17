@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from datetime import time
+import logging
 import hashlib
 from pathlib import Path
 from types import SimpleNamespace
@@ -11,7 +13,7 @@ from unittest.mock import AsyncMock, Mock
 import pytest
 import pytest_asyncio
 from pytest import TempPathFactory
-from homeassistant.const import CONF_EMAIL, CONF_PASSWORD
+from homeassistant.const import CONF_EMAIL, CONF_PASSWORD, CONF_TIME_ZONE
 from homeassistant.core import HomeAssistant
 from homeassistant.data_entry_flow import FlowResultType
 
@@ -27,7 +29,22 @@ from custom_components.securemtr import (
     async_unload_entry,
 )
 from custom_components.securemtr.beanbag import BeanbagGateway, BeanbagSession
-from custom_components.securemtr.config_flow import SecuremtrConfigFlow
+from custom_components.securemtr.config_flow import (
+    CONF_ANCHOR_STRATEGY,
+    CONF_BOOST_ANCHOR,
+    CONF_ELEMENT_POWER_KW,
+    CONF_PREFER_DEVICE_ENERGY,
+    CONF_PRIMARY_ANCHOR,
+    DEFAULT_ANCHOR_STRATEGY,
+    DEFAULT_BOOST_ANCHOR,
+    DEFAULT_ELEMENT_POWER_KW,
+    DEFAULT_PREFER_DEVICE_ENERGY,
+    DEFAULT_PRIMARY_ANCHOR,
+    DEFAULT_TIMEZONE,
+    SecuremtrConfigFlow,
+    _anchor_option_to_time,
+    _serialize_anchor,
+)
 
 
 @pytest_asyncio.fixture
@@ -225,3 +242,102 @@ async def test_config_flow_rejects_long_password(
     assert result["errors"] == {CONF_PASSWORD: "password_too_long"}
     flow.async_set_unique_id.assert_not_called()
     flow._abort_if_unique_id_configured.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_options_flow_uses_default_values() -> None:
+    """Ensure the options flow exposes documented defaults."""
+
+    handler = SecuremtrConfigFlow.async_get_options_flow(SimpleNamespace(options={}))
+
+    result = await handler.async_step_init()
+    assert result["type"] == FlowResultType.FORM
+    defaults = result["data_schema"]({})
+
+    assert defaults[CONF_TIME_ZONE] == DEFAULT_TIMEZONE
+    assert defaults[CONF_PRIMARY_ANCHOR] == time.fromisoformat(DEFAULT_PRIMARY_ANCHOR)
+    assert defaults[CONF_BOOST_ANCHOR] == time.fromisoformat(DEFAULT_BOOST_ANCHOR)
+    assert defaults[CONF_ANCHOR_STRATEGY] == DEFAULT_ANCHOR_STRATEGY
+    assert defaults[CONF_ELEMENT_POWER_KW] == DEFAULT_ELEMENT_POWER_KW
+    assert defaults[CONF_PREFER_DEVICE_ENERGY] == DEFAULT_PREFER_DEVICE_ENERGY
+
+
+@pytest.mark.asyncio
+async def test_options_flow_prefers_stored_values() -> None:
+    """Ensure stored options are respected as defaults."""
+
+    handler = SecuremtrConfigFlow.async_get_options_flow(
+        SimpleNamespace(
+            options={
+                CONF_TIME_ZONE: "America/New_York",
+                CONF_PRIMARY_ANCHOR: "06:15",
+                CONF_BOOST_ANCHOR: "18:45:30",
+                CONF_ANCHOR_STRATEGY: "strange",
+                CONF_ELEMENT_POWER_KW: "3.1",
+                CONF_PREFER_DEVICE_ENERGY: False,
+            }
+        )
+    )
+
+    result = await handler.async_step_init()
+    defaults = result["data_schema"]({})
+
+    assert defaults[CONF_TIME_ZONE] == "America/New_York"
+    assert defaults[CONF_PRIMARY_ANCHOR] == time(6, 15)
+    assert defaults[CONF_BOOST_ANCHOR] == time(18, 45, 30)
+    assert defaults[CONF_ANCHOR_STRATEGY] == DEFAULT_ANCHOR_STRATEGY
+    assert defaults[CONF_ELEMENT_POWER_KW] == pytest.approx(3.1)
+    assert defaults[CONF_PREFER_DEVICE_ENERGY] is False
+
+
+@pytest.mark.asyncio
+async def test_options_flow_creates_entry_with_serialized_times() -> None:
+    """Ensure anchor times are serialized to ISO strings when saved."""
+
+    handler = SecuremtrConfigFlow.async_get_options_flow(SimpleNamespace(options={}))
+
+    result = await handler.async_step_init(
+        {
+            CONF_TIME_ZONE: "Europe/Paris",
+            CONF_PRIMARY_ANCHOR: time(4, 30),
+            CONF_BOOST_ANCHOR: time(19, 0, 15),
+            CONF_ANCHOR_STRATEGY: "fixed",
+            CONF_ELEMENT_POWER_KW: 3.25,
+            CONF_PREFER_DEVICE_ENERGY: False,
+        }
+    )
+
+    assert result["type"] == FlowResultType.CREATE_ENTRY
+    assert result["data"] == {
+        CONF_TIME_ZONE: "Europe/Paris",
+        CONF_PRIMARY_ANCHOR: "04:30",
+        CONF_BOOST_ANCHOR: "19:00:15",
+        CONF_ANCHOR_STRATEGY: "fixed",
+        CONF_ELEMENT_POWER_KW: 3.25,
+        CONF_PREFER_DEVICE_ENERGY: False,
+    }
+
+
+def test_anchor_option_to_time_variants(caplog: pytest.LogCaptureFixture) -> None:
+    """Exercise conversions for stored anchor values."""
+
+    fallback = time(5, 0)
+    direct = time(6, 30)
+
+    assert _anchor_option_to_time(direct, fallback) is direct
+    assert _anchor_option_to_time("07:45", fallback) == time(7, 45)
+
+    caplog.set_level(logging.DEBUG)
+    assert _anchor_option_to_time("invalid", fallback) is fallback
+    assert any("Invalid anchor string" in record.message for record in caplog.records)
+
+
+def test_serialize_anchor_precision() -> None:
+    """Ensure anchor serialization preserves precision tiers."""
+
+    assert _serialize_anchor(time(4, 30)) == "04:30"
+    assert _serialize_anchor(time(4, 30, 5)) == "04:30:05"
+    assert (
+        _serialize_anchor(time(4, 30, 5, 120000))
+        == "04:30:05.120000"
+    )
