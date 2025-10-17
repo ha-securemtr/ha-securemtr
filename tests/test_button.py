@@ -1,6 +1,7 @@
 import asyncio
 from dataclasses import dataclass
 from datetime import datetime, timezone
+from dataclasses import dataclass
 from types import SimpleNamespace
 from typing import Any
 
@@ -19,6 +20,11 @@ from custom_components.securemtr.button import (
     async_setup_entry,
 )
 from homeassistant.components.button import ButtonEntity
+from custom_components.securemtr import DOMAIN, SecuremtrController, SecuremtrRuntimeData
+from custom_components.securemtr.button import (
+    SecuremtrConsumptionMetricsButton,
+    async_setup_entry,
+)
 from homeassistant.exceptions import HomeAssistantError
 
 
@@ -61,6 +67,16 @@ def _create_runtime() -> tuple[SecuremtrRuntimeData, DummyBackend]:
 
     backend = DummyBackend()
     runtime = SecuremtrRuntimeData(backend=backend)
+    """Stub backend for button tests."""
+
+    async def read_device_metadata(self, *args: Any, **kwargs: Any) -> None:  # pragma: no cover
+        """Unused backend stub."""
+
+
+def _create_runtime() -> SecuremtrRuntimeData:
+    """Create runtime data with a ready controller."""
+
+    runtime = SecuremtrRuntimeData(backend=DummyBackend())
     runtime.session = SimpleNamespace()
     runtime.websocket = SimpleNamespace()
     runtime.controller = SecuremtrController(

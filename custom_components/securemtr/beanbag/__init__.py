@@ -81,6 +81,19 @@ class BeanbagStateSnapshot:
     timed_boost_end_minute: int | None
 
 
+@dataclass(slots=True)
+class BeanbagEnergySample:
+    """Hold a single energy history sample reported by Beanbag."""
+
+    timestamp: int
+    primary_energy_kwh: float
+    boost_energy_kwh: float
+    primary_scheduled_minutes: int
+    primary_active_minutes: int
+    boost_scheduled_minutes: int
+    boost_active_minutes: int
+
+
 type ProgramZone = Literal["primary", "boost"]
 
 
@@ -1065,6 +1078,89 @@ class BeanbagBackend:
 
         return [{"I": index, "D": flattened}]
 
+    async def read_energy_history(
+        self,
+        session: BeanbagSession,
+        websocket: ClientWebSocketResponse,
+        gateway_id: str,
+        *,
+        window_index: int = 1,
+    ) -> list[BeanbagEnergySample]:
+        """Fetch the aggregated seven-day energy metrics for the controller."""
+
+        response = await self._send_request(
+            session,
+            websocket,
+            gateway_id,
+            header_hi=9,
+            header_si=36,
+            args=[window_index],
+        )
+
+        if not isinstance(response, list):
+            raise BeanbagWebSocketError(
+                "Beanbag energy history payload did not contain a list"
+            )
+
+        samples: list[BeanbagEnergySample] = []
+        for block in response:
+            if not isinstance(block, dict):
+                _LOGGER.debug(
+                    "Ignoring unexpected Beanbag energy block type %s",
+                    type(block).__name__,
+                )
+                continue
+
+            entries = block.get("D")
+            if not isinstance(entries, list):
+                _LOGGER.debug(
+                    "Ignoring Beanbag energy block without entry list"
+                )
+                continue
+
+            for entry in entries:
+                if not isinstance(entry, dict):
+                    _LOGGER.debug(
+                        "Ignoring Beanbag energy entry type %s",
+                        type(entry).__name__,
+                    )
+                    continue
+
+                timestamp = entry.get("T")
+                primary_energy = entry.get("OP")
+                boost_energy = entry.get("BP")
+                primary_schedule = entry.get("OS")
+                primary_active = entry.get("OA")
+                boost_schedule = entry.get("BS")
+                boost_active = entry.get("BA")
+
+                if not isinstance(timestamp, int):
+                    _LOGGER.debug("Skipping Beanbag energy entry without timestamp")
+                    continue
+
+                try:
+                    sample = BeanbagEnergySample(
+                        timestamp=timestamp,
+                        primary_energy_kwh=_coerce_energy(primary_energy),
+                        boost_energy_kwh=_coerce_energy(boost_energy),
+                        primary_scheduled_minutes=_coerce_minutes(primary_schedule),
+                        primary_active_minutes=_coerce_minutes(primary_active),
+                        boost_scheduled_minutes=_coerce_minutes(boost_schedule),
+                        boost_active_minutes=_coerce_minutes(boost_active),
+                    )
+                except (TypeError, ValueError) as error:
+                    _LOGGER.debug(
+                        "Skipping Beanbag energy entry due to invalid field: %s",
+                        error,
+                    )
+                    continue
+
+                samples.append(sample)
+
+        samples.sort(key=lambda sample: sample.timestamp)
+        _LOGGER.debug("Parsed %s Beanbag energy samples", len(samples))
+        return samples
+
     async def _send_request(
         self,
         session: BeanbagSession,
@@ -1133,8 +1229,34 @@ class BeanbagBackend:
             )
 
 
+def _coerce_energy(value: Any) -> float:
+    """Convert a Beanbag energy value into kilowatt-hours."""
+
+    if not isinstance(value, (int, float)):
+        raise TypeError("Energy values must be numeric")
+
+    if value < 0:
+        raise ValueError("Energy values must be non-negative")
+
+    return round(float(value) / 1000.0, 3)
+
+
+def _coerce_minutes(value: Any) -> int:
+    """Validate and normalise a Beanbag minute aggregate."""
+
+    if not isinstance(value, (int, float)):
+        raise TypeError("Minute values must be numeric")
+
+    minutes = int(value)
+    if minutes < 0:
+        raise ValueError("Minute values must be non-negative")
+
+    return minutes
+
+
 __all__ = [
     "BeanbagBackend",
+    "BeanbagEnergySample",
     "BeanbagGateway",
     "BeanbagHttpClient",
     "BeanbagLoginError",

@@ -19,10 +19,13 @@ from custom_components.securemtr.beanbag import (
     BeanbagBackend,
     BeanbagHttpClient,
     BeanbagLoginError,
+    BeanbagEnergySample,
     BeanbagSession,
     BeanbagWebSocketClient,
     BeanbagWebSocketError,
     DailyProgram,
+    _coerce_energy,
+    _coerce_minutes,
 )
 
 
@@ -762,6 +765,155 @@ async def test_backend_read_live_state_requires_object(
 
     with pytest.raises(BeanbagWebSocketError):
         await backend.read_live_state(session_data, DummyWebSocket(), "gateway-1")
+
+
+@pytest.mark.asyncio
+async def test_backend_read_energy_history_parses_samples() -> None:
+    """Validate that energy history responses are parsed into samples."""
+
+    backend = BeanbagBackend(Mock())
+
+    async def fake_send_request(*args, **kwargs):
+        return [
+            {
+                "I": 0,
+                "D": [
+                    {
+                        "T": 1_700_000_000,
+                        "OP": 1234,
+                        "BP": 10,
+                        "OS": 120,
+                        "OA": 100,
+                        "BS": 40,
+                        "BA": 30,
+                    },
+                    {
+                        "T": 1_700_086_400,
+                        "OP": 1500,
+                        "BP": 250,
+                        "OS": 180,
+                        "OA": 160,
+                        "BS": 60,
+                        "BA": 45,
+                    },
+                ],
+            }
+        ]
+
+    backend._send_request = fake_send_request  # type: ignore[assignment]
+
+    session = BeanbagSession(1, "abc", "token", None, ())
+    samples = await backend.read_energy_history(session, Mock(), "gateway-1")
+
+    assert samples == [
+        BeanbagEnergySample(
+            timestamp=1_700_000_000,
+            primary_energy_kwh=1.234,
+            boost_energy_kwh=0.01,
+            primary_scheduled_minutes=120,
+            primary_active_minutes=100,
+            boost_scheduled_minutes=40,
+            boost_active_minutes=30,
+        ),
+        BeanbagEnergySample(
+            timestamp=1_700_086_400,
+            primary_energy_kwh=1.5,
+            boost_energy_kwh=0.25,
+            primary_scheduled_minutes=180,
+            primary_active_minutes=160,
+            boost_scheduled_minutes=60,
+            boost_active_minutes=45,
+        ),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_backend_read_energy_history_handles_invalid_entries() -> None:
+    """Ensure malformed entries are ignored without crashing."""
+
+    backend = BeanbagBackend(Mock())
+
+    async def fake_send_request(*args, **kwargs):
+        return [
+            {
+                "I": 0,
+                "D": [
+                    {"T": "bad"},
+                    "bad-entry",
+                    {
+                        "T": 1_700_000_000,
+                        "OP": 0,
+                        "BP": 0,
+                        "OS": 0,
+                        "OA": 0,
+                        "BS": 0,
+                        "BA": 0,
+                    },
+                    {
+                        "T": 1_700_172_800,
+                        "OP": "bad-energy",
+                        "BP": 0,
+                        "OS": 0,
+                        "OA": 0,
+                        "BS": 0,
+                        "BA": 0,
+                    },
+                ],
+            },
+            {"I": 1},
+            "noise",
+        ]
+
+    backend._send_request = fake_send_request  # type: ignore[assignment]
+
+    session = BeanbagSession(1, "abc", "token", None, ())
+    samples = await backend.read_energy_history(session, Mock(), "gateway-1")
+
+    assert samples == [
+        BeanbagEnergySample(
+            timestamp=1_700_000_000,
+            primary_energy_kwh=0.0,
+            boost_energy_kwh=0.0,
+            primary_scheduled_minutes=0,
+            primary_active_minutes=0,
+            boost_scheduled_minutes=0,
+            boost_active_minutes=0,
+        )
+    ]
+
+
+@pytest.mark.asyncio
+async def test_backend_read_energy_history_requires_list() -> None:
+    """Raise when the energy history payload is not a list."""
+
+    backend = BeanbagBackend(Mock())
+
+    async def fake_send_request(*args, **kwargs):
+        return {"unexpected": True}
+
+    backend._send_request = fake_send_request  # type: ignore[assignment]
+
+    session = BeanbagSession(1, "abc", "token", None, ())
+    with pytest.raises(BeanbagWebSocketError):
+        await backend.read_energy_history(session, Mock(), "gateway-1")
+
+
+def test_coerce_energy_validates_inputs() -> None:
+    """Verify the energy coercion helper rejects invalid values."""
+
+    with pytest.raises(TypeError):
+        _coerce_energy("bad")
+    with pytest.raises(ValueError):
+        _coerce_energy(-1)
+
+
+def test_coerce_minutes_validates_inputs() -> None:
+    """Verify the minute coercion helper rejects invalid values."""
+
+    with pytest.raises(TypeError):
+        _coerce_minutes("bad")
+    with pytest.raises(ValueError):
+        _coerce_minutes(-5)
 
 
 @pytest.mark.asyncio

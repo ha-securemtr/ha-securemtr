@@ -1,4 +1,4 @@
-"""Button entities for Secure Meters timed boost control."""
+"""Button entities for Secure Meters."""
 
 from __future__ import annotations
 
@@ -11,6 +11,7 @@ from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
 from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers.dispatcher import async_dispatcher_connect
+from homeassistant.helpers.device_registry import DeviceInfo
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.util import dt as dt_util
 
@@ -20,10 +21,12 @@ from . import (
     SecuremtrRuntimeData,
     async_dispatch_runtime_update,
     coerce_end_time,
+    consumption_metrics,
     runtime_update_signal,
 )
 from .beanbag import BeanbagError
 from .entity import build_device_info, slugify_identifier
+from .switch import _build_device_info, _slugify_identifier
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -35,7 +38,7 @@ async def async_setup_entry(
     entry: ConfigEntry,
     async_add_entities: AddEntitiesCallback,
 ) -> None:
-    """Set up Secure Meters timed boost buttons for a config entry."""
+    """Set up Secure Meters button entities for a config entry."""
 
     runtime: SecuremtrRuntimeData = hass.data[DOMAIN][entry.entry_id]
 
@@ -58,12 +61,19 @@ async def async_setup_entry(
             SecuremtrTimedBoostButton(runtime, controller, entry.entry_id, 60),
             SecuremtrTimedBoostButton(runtime, controller, entry.entry_id, 120),
             SecuremtrCancelBoostButton(runtime, controller, entry.entry_id),
+            SecuremtrConsumptionMetricsButton(runtime, controller, entry.entry_id),
         ]
     )
 
 
 class _SecuremtrBaseButton(ButtonEntity):
     """Provide shared behaviour for Secure Meters button entities."""
+        [SecuremtrConsumptionMetricsButton(hass, entry, runtime, controller)]
+    )
+
+    
+class SecuremtrConsumptionMetricsButton(ButtonEntity):
+    """Trigger a manual refresh of Secure Meters consumption metrics."""
 
     _attr_should_poll = False
 
