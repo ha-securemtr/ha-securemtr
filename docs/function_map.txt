@@ -81,3 +81,10 @@ custom_components.securemtr.entity.slugify_identifier: Convert a controller iden
 custom_components.securemtr.entity.build_device_info: Construct device registry metadata for the provided controller.
 custom_components.securemtr.button.async_setup_entry: Set up Secure Meters button entities for a config entry.
 custom_components.securemtr.beanbag.BeanbagEnergySample: Hold a single energy history sample reported by Beanbag.
+custom_components.securemtr.utils.EnergyCalibration: Describe energy calibration parameters.
+custom_components.securemtr.utils.to_local: Convert a timestamp into an aware datetime in the provided timezone.
+custom_components.securemtr.utils.report_day_for_sample: Return the local calendar day represented by a consumption sample.
+custom_components.securemtr.utils.safe_anchor_datetime: Return an aware datetime within the requested day even across DST shifts.
+custom_components.securemtr.utils.calibrate_energy_scale: Return calibration data describing how to interpret device energy.
+custom_components.securemtr.utils.energy_from_row: Compute energy for a row using calibration or fallback duration power.
+custom_components.securemtr.utils.cumulative_update: Return the updated cumulative value from the provided delta.
