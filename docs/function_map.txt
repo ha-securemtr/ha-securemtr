@@ -67,6 +67,10 @@ custom_components.securemtr.button.SecuremtrCancelBoostButton.available: Only ex
 custom_components.securemtr.button.SecuremtrCancelBoostButton.async_press: Send the timed boost stop command.
 custom_components.securemtr.button.SecuremtrConsumptionMetricsButton: Trigger a manual refresh of Secure Meters consumption metrics.
 custom_components.securemtr.button.SecuremtrConsumptionMetricsButton.async_press: Trigger an on-demand refresh of consumption metrics.
+custom_components.securemtr.button.SecuremtrLogWeeklyScheduleButton: Read and log the configured weekly schedules.
+custom_components.securemtr.button.SecuremtrLogWeeklyScheduleButton.async_press: Fetch the weekly programs for both zones and emit them to the log.
+custom_components.securemtr.button.SecuremtrLogWeeklyScheduleButton._format_program_summary: Convert a weekly program into a human-readable dictionary.
+custom_components.securemtr.button.SecuremtrLogWeeklyScheduleButton._format_transitions: Translate minute offsets into HH:MM strings.
 custom_components.securemtr.binary_sensor.async_setup_entry: Set up the Secure Meters boost binary sensor.
 custom_components.securemtr.binary_sensor._SecuremtrBaseBinarySensor: Provide shared behaviour for Secure Meters binary sensors.
 custom_components.securemtr.binary_sensor.SecuremtrBoostActiveBinarySensor.is_on: Return whether the timed boost is active.

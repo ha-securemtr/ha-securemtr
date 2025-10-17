@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 from dataclasses import dataclass
 from datetime import datetime, timezone
+import logging
 from types import SimpleNamespace
 from typing import Any
 
@@ -16,10 +17,11 @@ from custom_components.securemtr import (
     SecuremtrRuntimeData,
     coerce_end_time,
 )
-from custom_components.securemtr.beanbag import BeanbagError
+from custom_components.securemtr.beanbag import BeanbagError, DailyProgram
 from custom_components.securemtr.button import (
     SecuremtrCancelBoostButton,
     SecuremtrConsumptionMetricsButton,
+    SecuremtrLogWeeklyScheduleButton,
     SecuremtrTimedBoostButton,
     async_setup_entry,
 )
@@ -40,6 +42,9 @@ class DummyBackend:
     def __init__(self) -> None:
         self.start_calls: list[tuple[Any, Any, str, int]] = []
         self.stop_calls: list[tuple[Any, Any, str]] = []
+        self.read_calls: list[str] = []
+        self.weekly_programs: dict[str, tuple[DailyProgram, ...]] = {}
+        self.read_error: Exception | None = None
 
     async def start_timed_boost(
         self,
@@ -59,6 +64,25 @@ class DummyBackend:
         """Record a stop command."""
 
         self.stop_calls.append((session, websocket, gateway_id))
+
+    async def read_weekly_program(
+        self,
+        session: Any,
+        websocket: Any,
+        gateway_id: str,
+        *,
+        zone: str,
+    ) -> tuple[DailyProgram, ...]:
+        """Return the stored weekly program for the requested zone."""
+
+        self.read_calls.append(zone)
+        if self.read_error is not None:
+            raise self.read_error
+
+        program = self.weekly_programs.get(zone)
+        if program is None:
+            raise AssertionError(f"No weekly program configured for zone {zone}")
+        return program
 
 
 def _create_runtime() -> tuple[SecuremtrRuntimeData, DummyBackend]:
@@ -101,6 +125,7 @@ async def test_button_setup_creates_entities() -> None:
         "serial_1_boost_120",
         "serial_1_boost_cancel",
         "serial_1_refresh_consumption",
+        "serial_1_log_schedule",
     }
 
     cancel_button = next(
@@ -113,6 +138,11 @@ async def test_button_setup_creates_entities() -> None:
         entity for entity in entities if entity.unique_id.endswith("refresh_consumption")
     )
     assert isinstance(metrics_button, SecuremtrConsumptionMetricsButton)
+
+    schedule_button = next(
+        entity for entity in entities if entity.unique_id.endswith("log_schedule")
+    )
+    assert isinstance(schedule_button, SecuremtrLogWeeklyScheduleButton)
 
     boost_button = next(
         entity for entity in entities if entity.unique_id.endswith("boost_60")
@@ -183,6 +213,93 @@ async def test_boost_button_requires_connection() -> None:
         await boost_button.async_press()
 
     assert backend.start_calls == []
+
+
+@pytest.mark.asyncio
+async def test_schedule_button_logs_program(caplog: pytest.LogCaptureFixture) -> None:
+    """Log both weekly programs when the schedule button is pressed."""
+
+    runtime, backend = _create_runtime()
+    hass = SimpleNamespace(data={DOMAIN: {"entry": runtime}})
+    entry = DummyEntry(entry_id="entry")
+    entities: list[ButtonEntity] = []
+
+    weekday = DailyProgram((60, None, None), (120, None, None))
+    weekend = DailyProgram((480, 1020, None), (540, 1320, None))
+    backend.weekly_programs = {
+        "primary": (weekday,) * 5 + (weekend,) * 2,
+        "boost": (weekend,) * 7,
+    }
+
+    await async_setup_entry(hass, entry, entities.extend)
+
+    schedule_button = next(
+        entity for entity in entities if entity.unique_id.endswith("log_schedule")
+    )
+    assert isinstance(schedule_button, SecuremtrLogWeeklyScheduleButton)
+
+    schedule_button.hass = SimpleNamespace()
+    with caplog.at_level(logging.INFO):
+        await schedule_button.async_press()
+
+    assert backend.read_calls == ["primary", "boost"]
+    assert any("primary zone" in record for record in caplog.messages)
+    assert any("boost zone" in record for record in caplog.messages)
+    assert any("Monday" in record and "01:00" in record for record in caplog.messages)
+    assert any("Saturday" in record and "08:00" in record for record in caplog.messages)
+
+
+@pytest.mark.asyncio
+async def test_schedule_button_backend_error(caplog: pytest.LogCaptureFixture) -> None:
+    """Convert backend read failures into Home Assistant errors."""
+
+    runtime, backend = _create_runtime()
+    hass = SimpleNamespace(data={DOMAIN: {"entry": runtime}})
+    entry = DummyEntry(entry_id="entry")
+    entities: list[ButtonEntity] = []
+
+    backend.weekly_programs = {}
+    backend.read_error = BeanbagError("boom")
+
+    await async_setup_entry(hass, entry, entities.extend)
+    schedule_button = next(
+        entity for entity in entities if entity.unique_id.endswith("log_schedule")
+    )
+
+    schedule_button.hass = SimpleNamespace()
+    with caplog.at_level(logging.ERROR):
+        with pytest.raises(HomeAssistantError):
+            await schedule_button.async_press()
+
+    assert backend.read_calls == ["primary"]
+    assert any("Failed to read Secure Meters weekly schedule" in record for record in caplog.messages)
+
+
+@pytest.mark.asyncio
+async def test_schedule_button_requires_connection() -> None:
+    """Ensure the schedule button validates the runtime connection."""
+
+    runtime, backend = _create_runtime()
+    runtime.session = None
+    hass = SimpleNamespace(data={DOMAIN: {"entry": runtime}})
+    entry = DummyEntry(entry_id="entry")
+    entities: list[ButtonEntity] = []
+
+    backend.weekly_programs = {
+        "primary": (DailyProgram((None, None, None), (None, None, None)),) * 7,
+        "boost": (DailyProgram((None, None, None), (None, None, None)),) * 7,
+    }
+
+    await async_setup_entry(hass, entry, entities.extend)
+
+    schedule_button = next(
+        entity for entity in entities if entity.unique_id.endswith("log_schedule")
+    )
+
+    with pytest.raises(HomeAssistantError):
+        await schedule_button.async_press()
+
+    assert backend.read_calls == []
 
 
 @pytest.mark.asyncio

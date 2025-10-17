@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Iterable
 from datetime import timedelta
 import logging
 
@@ -10,8 +11,8 @@ from homeassistant.components.button import ButtonEntity
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
 from homeassistant.exceptions import HomeAssistantError
-from homeassistant.helpers.dispatcher import async_dispatcher_connect
 from homeassistant.helpers.device_registry import DeviceInfo
+from homeassistant.helpers.dispatcher import async_dispatcher_connect
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.util import dt as dt_util
 
@@ -24,12 +25,22 @@ from . import (
     consumption_metrics,
     runtime_update_signal,
 )
-from .beanbag import BeanbagError
+from .beanbag import BeanbagError, WeeklyProgram
 from .entity import build_device_info, slugify_identifier
 
 _LOGGER = logging.getLogger(__name__)
 
 _CONTROLLER_WAIT_TIMEOUT = 15.0
+
+_DAY_NAMES: tuple[str, ...] = (
+    "Monday",
+    "Tuesday",
+    "Wednesday",
+    "Thursday",
+    "Friday",
+    "Saturday",
+    "Sunday",
+)
 
 
 async def async_setup_entry(
@@ -61,6 +72,7 @@ async def async_setup_entry(
             SecuremtrTimedBoostButton(runtime, controller, entry, 120),
             SecuremtrCancelBoostButton(runtime, controller, entry),
             SecuremtrConsumptionMetricsButton(runtime, controller, entry),
+            SecuremtrLogWeeklyScheduleButton(runtime, controller, entry),
         ]
     )
 
@@ -142,6 +154,106 @@ class SecuremtrConsumptionMetricsButton(_SecuremtrBaseButton):
             raise HomeAssistantError("Home Assistant instance is not available")
 
         await consumption_metrics(hass, self._entry)
+
+
+class SecuremtrLogWeeklyScheduleButton(_SecuremtrBaseButton):
+    """Read and log the configured weekly schedules."""
+
+    def __init__(
+        self,
+        runtime: SecuremtrRuntimeData,
+        controller: SecuremtrController,
+        entry: ConfigEntry,
+    ) -> None:
+        """Initialise the schedule logging button."""
+
+        super().__init__(runtime, controller, entry)
+        self._attr_unique_id = f"{self._identifier_slug()}_log_schedule"
+        self._attr_name = "Log Weekly Schedules"
+
+    async def async_press(self) -> None:
+        """Fetch the weekly programs for both zones and emit them to the log."""
+
+        runtime = self._runtime
+        controller = runtime.controller
+        session = runtime.session
+        websocket = runtime.websocket
+
+        if controller is None or session is None or websocket is None:
+            raise HomeAssistantError("Secure Meters controller is not connected")
+
+        async with runtime.command_lock:
+            try:
+                primary_program = await runtime.backend.read_weekly_program(
+                    session,
+                    websocket,
+                    controller.gateway_id,
+                    zone="primary",
+                )
+                boost_program = await runtime.backend.read_weekly_program(
+                    session,
+                    websocket,
+                    controller.gateway_id,
+                    zone="boost",
+                )
+            except BeanbagError as error:
+                _LOGGER.error("Failed to read Secure Meters weekly schedule: %s", error)
+                raise HomeAssistantError(
+                    "Failed to read Secure Meters weekly schedule"
+                ) from error
+
+        controller_label = (
+            controller.name
+            or controller.serial_number
+            or controller.identifier
+            or controller.gateway_id
+        )
+
+        primary_summary = self._format_program_summary(primary_program)
+        boost_summary = self._format_program_summary(boost_program)
+
+        _LOGGER.info(
+            "Secure Meters weekly schedule for %s primary zone: %s",
+            controller_label,
+            primary_summary,
+        )
+        _LOGGER.info(
+            "Secure Meters weekly schedule for %s boost zone: %s",
+            controller_label,
+            boost_summary,
+        )
+
+    @staticmethod
+    def _format_program_summary(
+        program: WeeklyProgram,
+    ) -> dict[str, dict[str, list[str]]]:
+        """Convert a weekly program into a human-readable dictionary."""
+
+        summary: dict[str, dict[str, list[str]]] = {}
+        for day_name, day_program in zip(_DAY_NAMES, program, strict=False):
+            summary[day_name] = {
+                "on": SecuremtrLogWeeklyScheduleButton._format_transitions(
+                    day_program.on_minutes
+                ),
+                "off": SecuremtrLogWeeklyScheduleButton._format_transitions(
+                    day_program.off_minutes
+                ),
+            }
+        return summary
+
+    @staticmethod
+    def _format_transitions(
+        minutes: Iterable[int | None],
+    ) -> list[str]:
+        """Translate minute offsets into HH:MM strings."""
+
+        formatted: list[str] = []
+        for minute in minutes:
+            if minute is None:
+                continue
+            hours, remainder = divmod(minute, 60)
+            formatted.append(f"{hours:02d}:{remainder:02d}")
+        return formatted
 
 
 class SecuremtrTimedBoostButton(_SecuremtrBaseButton):
@@ -259,6 +371,8 @@ class SecuremtrCancelBoostButton(_SecuremtrBaseButton):
 
 
 __all__ = [
-    "SecuremtrTimedBoostButton",
     "SecuremtrCancelBoostButton",
+    "SecuremtrConsumptionMetricsButton",
+    "SecuremtrLogWeeklyScheduleButton",
+    "SecuremtrTimedBoostButton",
 ]
