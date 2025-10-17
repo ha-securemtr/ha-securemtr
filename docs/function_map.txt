@@ -61,11 +61,12 @@ custom_components.securemtr.switch.SecuremtrTimedBoostSwitch.is_on: Return wheth
 custom_components.securemtr.switch.SecuremtrTimedBoostSwitch.async_turn_on: Enable the timed boost feature in the backend.
 custom_components.securemtr.switch.SecuremtrTimedBoostSwitch.async_turn_off: Disable the timed boost feature in the backend.
 custom_components.securemtr.switch.SecuremtrTimedBoostSwitch._async_set_timed_boost: Drive the backend to the requested timed boost state.
-custom_components.securemtr.button.async_setup_entry: Set up Secure Meters timed boost buttons for a config entry.
 custom_components.securemtr.button._SecuremtrBaseButton: Provide shared behaviour for Secure Meters button entities.
 custom_components.securemtr.button.SecuremtrTimedBoostButton.async_press: Send the timed boost start command for the configured duration.
 custom_components.securemtr.button.SecuremtrCancelBoostButton.available: Only expose the button while a timed boost is active.
 custom_components.securemtr.button.SecuremtrCancelBoostButton.async_press: Send the timed boost stop command.
+custom_components.securemtr.button.SecuremtrConsumptionMetricsButton: Trigger a manual refresh of Secure Meters consumption metrics.
+custom_components.securemtr.button.SecuremtrConsumptionMetricsButton.async_press: Trigger an on-demand refresh of consumption metrics.
 custom_components.securemtr.binary_sensor.async_setup_entry: Set up the Secure Meters boost binary sensor.
 custom_components.securemtr.binary_sensor._SecuremtrBaseBinarySensor: Provide shared behaviour for Secure Meters binary sensors.
 custom_components.securemtr.binary_sensor.SecuremtrBoostActiveBinarySensor.is_on: Return whether the timed boost is active.
@@ -74,8 +75,5 @@ custom_components.securemtr.sensor._SecuremtrBaseSensor: Provide shared behaviou
 custom_components.securemtr.sensor.SecuremtrBoostEndsSensor.native_value: Return the boost end timestamp when active.
 custom_components.securemtr.entity.slugify_identifier: Convert a controller identifier into a slug for unique IDs.
 custom_components.securemtr.entity.build_device_info: Construct device registry metadata for the provided controller.
-custom_components.securemtr.switch._slugify_identifier: Convert the controller identifier into a slug suitable for unique IDs.
-custom_components.securemtr.switch._build_device_info: Construct device registry metadata for the provided controller.
 custom_components.securemtr.button.async_setup_entry: Set up Secure Meters button entities for a config entry.
-custom_components.securemtr.button.SecuremtrConsumptionMetricsButton: Trigger a manual refresh of Secure Meters consumption metrics.
 custom_components.securemtr.beanbag.BeanbagEnergySample: Hold a single energy history sample reported by Beanbag.

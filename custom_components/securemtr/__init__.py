@@ -113,8 +113,9 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
     config_entries_helper = getattr(hass, "config_entries", None)
     if config_entries_helper is not None:
+        await config_entries_helper.async_forward_entry_setups(entry, ["switch"])
         await config_entries_helper.async_forward_entry_setups(
-            entry, ["button", "binary_sensor", "sensor", "switch"]
+            entry, ["button", "binary_sensor", "sensor"]
         )
     else:
         _LOGGER.debug(
