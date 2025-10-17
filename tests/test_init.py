@@ -990,7 +990,7 @@ def test_build_controller_normalises_metadata() -> None:
 
     controller = _build_controller(metadata, gateway)
     assert controller.identifier == "gateway-1"
-    assert controller.name == "E7+ Water Heater (gateway-1)"
+    assert controller.name == "E7+ Smart Water Heater Controller"
     assert controller.serial_number is None
     assert controller.firmware_version == "2"
     assert controller.model == "E7+"
@@ -1008,7 +1008,7 @@ def test_build_controller_ignores_numeric_name() -> None:
     )
 
     controller = _build_controller(metadata, gateway)
-    assert controller.name == "E7+ Water Heater (SN: E0031158)"
+    assert controller.name == "E7+ Smart Water Heater Controller"
     assert controller.serial_number == "E0031158"
 
 

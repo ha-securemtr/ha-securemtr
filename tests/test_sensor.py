@@ -34,7 +34,7 @@ def _create_runtime() -> SecuremtrRuntimeData:
     runtime.websocket = SimpleNamespace()
     runtime.controller = SecuremtrController(
         identifier="controller-1",
-        name="E7+ Controller",
+        name="E7+ Smart Water Heater Controller",
         gateway_id="gateway-1",
         serial_number="serial-1",
         firmware_version="1.0.0",
@@ -62,7 +62,9 @@ async def test_sensor_reports_end_time() -> None:
     assert isinstance(sensor, SecuremtrBoostEndsSensor)
     assert sensor.unique_id == "serial_1_boost_ends"
     assert sensor.native_value is None
-    assert sensor.device_info["name"] == "E7+ Water Heater (SN: serial-1)"
+    assert (
+        sensor.device_info["name"] == "E7+ Smart Water Heater Controller"
+    )
     assert sensor.available is True
 
     sensor.hass = SimpleNamespace()

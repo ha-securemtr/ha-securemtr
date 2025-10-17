@@ -81,7 +81,7 @@ def _create_runtime() -> tuple[SecuremtrRuntimeData, DummyBackend]:
     runtime.websocket = SimpleNamespace()
     runtime.controller = SecuremtrController(
         identifier="controller-1",
-        name="E7+ Water Heater (SN: serial-1)",
+        name="E7+ Smart Water Heater Controller",
         gateway_id="gateway-1",
         serial_number="serial-1",
         firmware_version="1.0.0",
@@ -124,7 +124,10 @@ async def test_switch_setup_creates_entity(monkeypatch: pytest.MonkeyPatch) -> N
     assert power_switch.available
     assert timed_switch.available
     assert power_switch.device_info["identifiers"] == {(DOMAIN, "serial-1")}
-    assert timed_switch.device_info["name"] == "E7+ Water Heater (SN: serial-1)"
+    assert (
+        timed_switch.device_info["name"]
+        == "E7+ Smart Water Heater Controller"
+    )
     assert timed_switch.device_info["model"] == "E7+"
     assert power_switch.name == "E7+ Controller"
     assert timed_switch.name == "Timed Boost"
@@ -198,7 +201,7 @@ def test_switch_device_info_without_serial() -> None:
     runtime, _backend = _create_runtime()
     controller = SecuremtrController(
         identifier="controller-1",
-        name="E7+ Water Heater (controller-1)",
+        name="E7+ Smart Water Heater Controller",
         gateway_id="gateway-1",
         serial_number=None,
         firmware_version=None,
@@ -207,7 +210,7 @@ def test_switch_device_info_without_serial() -> None:
 
     switch = SecuremtrPowerSwitch(runtime, controller, "entry")
     device_info = switch.device_info
-    assert device_info["name"] == "E7+ Water Heater (controller-1)"
+    assert device_info["name"] == "E7+ Smart Water Heater Controller"
     assert device_info["serial_number"] is None
 
 

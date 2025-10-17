@@ -94,7 +94,7 @@ def _create_runtime() -> tuple[SecuremtrRuntimeData, DummyBackend]:
     runtime.websocket = SimpleNamespace()
     runtime.controller = SecuremtrController(
         identifier="controller-1",
-        name="E7+ Controller",
+        name="E7+ Smart Water Heater Controller",
         gateway_id="gateway-1",
         serial_number="serial-1",
         firmware_version="1.0.0",
@@ -147,7 +147,10 @@ async def test_button_setup_creates_entities() -> None:
     boost_button = next(
         entity for entity in entities if entity.unique_id.endswith("boost_60")
     )
-    assert boost_button.device_info["name"] == "E7+ Water Heater (SN: serial-1)"
+    assert (
+        boost_button.device_info["name"]
+        == "E7+ Smart Water Heater Controller"
+    )
 
 
 @pytest.mark.asyncio
