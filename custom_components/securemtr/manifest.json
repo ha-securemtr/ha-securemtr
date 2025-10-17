@@ -1,6 +1,6 @@
 {
   "domain": "securemtr",
-  "name": "Securemtr",
+  "name": "SecureMTR",
   "after_dependencies": ["recorder"],
   "codeowners": [
     "@ha-securemtr"
