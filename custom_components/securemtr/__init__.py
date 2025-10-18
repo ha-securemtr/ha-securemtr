@@ -1159,7 +1159,8 @@ def _build_statistic_metadata(
     """Create metadata for a statistic export."""
 
     identifier = entry_identifier.strip() or entry_identifier
-    fallback_statistic_id = f"{DOMAIN}:{entry_slug}:{suffix}"
+    fallback_object_id = f"{DOMAIN}_{entry_slug}_{suffix}"
+    fallback_statistic_id = f"sensor.{fallback_object_id}"
     if statistic_id_override and valid_entity_id(statistic_id_override):
         statistic_id = statistic_id_override
     else:

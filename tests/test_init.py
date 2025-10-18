@@ -1067,10 +1067,10 @@ async def test_consumption_metrics_refreshes_history(
     stat_ids = {
         "sensor.serial_1_primary_energy_total",
         "sensor.serial_1_boost_energy_total",
-        f"{DOMAIN}:{entry_slug}:primary_runtime_h",
-        f"{DOMAIN}:{entry_slug}:primary_sched_h",
-        f"{DOMAIN}:{entry_slug}:boost_runtime_h",
-        f"{DOMAIN}:{entry_slug}:boost_sched_h",
+        f"sensor.{DOMAIN}_{entry_slug}_primary_runtime_h",
+        f"sensor.{DOMAIN}_{entry_slug}_primary_sched_h",
+        f"sensor.{DOMAIN}_{entry_slug}_boost_runtime_h",
+        f"sensor.{DOMAIN}_{entry_slug}_boost_sched_h",
     }
     assert set(capture_statistics) == stat_ids
 
@@ -1126,16 +1126,16 @@ async def test_consumption_metrics_refreshes_history(
             assert entry["max"] == pytest.approx(values[index])
 
     _assert_duration(
-        f"{DOMAIN}:{entry_slug}:primary_runtime_h", primary_runtime, time(3, 0)
+        f"sensor.{DOMAIN}_{entry_slug}_primary_runtime_h", primary_runtime, time(3, 0)
     )
     _assert_duration(
-        f"{DOMAIN}:{entry_slug}:primary_sched_h", primary_scheduled, time(3, 0)
+        f"sensor.{DOMAIN}_{entry_slug}_primary_sched_h", primary_scheduled, time(3, 0)
     )
     _assert_duration(
-        f"{DOMAIN}:{entry_slug}:boost_runtime_h", boost_runtime, time(17, 30)
+        f"sensor.{DOMAIN}_{entry_slug}_boost_runtime_h", boost_runtime, time(17, 30)
     )
     _assert_duration(
-        f"{DOMAIN}:{entry_slug}:boost_sched_h", boost_scheduled, time(17, 30)
+        f"sensor.{DOMAIN}_{entry_slug}_boost_sched_h", boost_scheduled, time(17, 30)
     )
 
     assert store_instances and store_instances[0].saved
@@ -1408,7 +1408,7 @@ async def test_consumption_metrics_falls_back_on_invalid_entity_statistic_id(
     await consumption_metrics(hass, entry)
 
     entry_slug = slugify_identifier(entry.title or entry.entry_id)
-    fallback_id = f"{DOMAIN}:{entry_slug}:primary_energy_kwh"
+    fallback_id = f"sensor.{DOMAIN}_{entry_slug}_primary_energy_kwh"
 
     assert fallback_id in capture_statistics
     assert "sensor.invalid-id" not in capture_statistics
