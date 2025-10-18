@@ -880,17 +880,25 @@ def _load_statistics_options(entry: ConfigEntry) -> StatisticsOptions:
     )
 
     options = entry.options
-    timezone_name = options.get(CONF_TIME_ZONE, DEFAULT_TIMEZONE)
+    hass_timezone: str | None = None
+    hass = getattr(entry, "hass", None)
+    if hass is not None:
+        hass_timezone = getattr(hass.config, "time_zone", None)
+
+    timezone_name = hass_timezone or options.get(CONF_TIME_ZONE) or DEFAULT_TIMEZONE
     timezone = dt_util.get_time_zone(timezone_name)
 
     if timezone is None:
         _LOGGER.warning(
-            "Invalid timezone %s for %s; falling back to Home Assistant timezone",
+            "Invalid timezone %s for %s; falling back to Home Assistant default",
             timezone_name,
             _entry_display_name(entry),
         )
-        timezone = dt_util.get_time_zone(DEFAULT_TIMEZONE)
-        timezone_name = DEFAULT_TIMEZONE
+        timezone_name = hass_timezone or DEFAULT_TIMEZONE
+        timezone = dt_util.get_time_zone(timezone_name)
+        if timezone is None:
+            timezone = dt_util.get_time_zone(DEFAULT_TIMEZONE)
+            timezone_name = DEFAULT_TIMEZONE
         if timezone is None:
             timezone = dt_util.get_default_time_zone()
             timezone_name = getattr(timezone, "key", None) or timezone.tzname(

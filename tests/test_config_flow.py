@@ -2,12 +2,12 @@
 
 from __future__ import annotations
 
-from datetime import time
-import logging
 import hashlib
+import logging
 from pathlib import Path
 from types import SimpleNamespace
 import sys
+from datetime import time
 from unittest.mock import AsyncMock, Mock
 
 import pytest
@@ -29,23 +29,23 @@ from custom_components.securemtr import (
     async_unload_entry,
 )
 from custom_components.securemtr.beanbag import BeanbagGateway, BeanbagSession
+import custom_components.securemtr.config_flow as config_flow
 from custom_components.securemtr.config_flow import (
     CONF_ANCHOR_STRATEGY,
     CONF_BOOST_ANCHOR,
     CONF_ELEMENT_POWER_KW,
     CONF_PREFER_DEVICE_ENERGY,
     CONF_PRIMARY_ANCHOR,
+    DEFAULT_TIMEZONE,
     DEFAULT_ANCHOR_STRATEGY,
     DEFAULT_BOOST_ANCHOR,
     DEFAULT_ELEMENT_POWER_KW,
     DEFAULT_PREFER_DEVICE_ENERGY,
     DEFAULT_PRIMARY_ANCHOR,
-    DEFAULT_TIMEZONE,
     SecuremtrConfigFlow,
     _anchor_option_to_time,
     _serialize_anchor,
 )
-
 
 @pytest_asyncio.fixture
 async def hass_fixture(tmp_path_factory: TempPathFactory) -> HomeAssistant:
@@ -249,12 +249,12 @@ async def test_options_flow_uses_default_values() -> None:
     """Ensure the options flow exposes documented defaults."""
 
     handler = SecuremtrConfigFlow.async_get_options_flow(SimpleNamespace(options={}))
+    handler.hass = SimpleNamespace(config=SimpleNamespace(time_zone="Europe/Dublin"))
 
     result = await handler.async_step_init()
     assert result["type"] == FlowResultType.FORM
     defaults = result["data_schema"]({})
 
-    assert defaults[CONF_TIME_ZONE] == DEFAULT_TIMEZONE
     assert defaults[CONF_PRIMARY_ANCHOR] == time.fromisoformat(DEFAULT_PRIMARY_ANCHOR)
     assert defaults[CONF_BOOST_ANCHOR] == time.fromisoformat(DEFAULT_BOOST_ANCHOR)
     assert defaults[CONF_ANCHOR_STRATEGY] == DEFAULT_ANCHOR_STRATEGY
@@ -269,7 +269,6 @@ async def test_options_flow_prefers_stored_values() -> None:
     handler = SecuremtrConfigFlow.async_get_options_flow(
         SimpleNamespace(
             options={
-                CONF_TIME_ZONE: "America/New_York",
                 CONF_PRIMARY_ANCHOR: "06:15",
                 CONF_BOOST_ANCHOR: "18:45:30",
                 CONF_ANCHOR_STRATEGY: "strange",
@@ -278,11 +277,11 @@ async def test_options_flow_prefers_stored_values() -> None:
             }
         )
     )
+    handler.hass = SimpleNamespace(config=SimpleNamespace(time_zone="Europe/Dublin"))
 
     result = await handler.async_step_init()
     defaults = result["data_schema"]({})
 
-    assert defaults[CONF_TIME_ZONE] == "America/New_York"
     assert defaults[CONF_PRIMARY_ANCHOR] == time(6, 15)
     assert defaults[CONF_BOOST_ANCHOR] == time(18, 45, 30)
     assert defaults[CONF_ANCHOR_STRATEGY] == DEFAULT_ANCHOR_STRATEGY
@@ -295,10 +294,10 @@ async def test_options_flow_creates_entry_with_serialized_times() -> None:
     """Ensure anchor times are serialized to ISO strings when saved."""
 
     handler = SecuremtrConfigFlow.async_get_options_flow(SimpleNamespace(options={}))
+    handler.hass = SimpleNamespace(config=SimpleNamespace(time_zone="Europe/Paris"))
 
     result = await handler.async_step_init(
         {
-            CONF_TIME_ZONE: "Europe/Paris",
             CONF_PRIMARY_ANCHOR: time(4, 30),
             CONF_BOOST_ANCHOR: time(19, 0, 15),
             CONF_ANCHOR_STRATEGY: "fixed",
@@ -316,6 +315,54 @@ async def test_options_flow_creates_entry_with_serialized_times() -> None:
         CONF_ELEMENT_POWER_KW: 3.25,
         CONF_PREFER_DEVICE_ENERGY: False,
     }
+
+
+@pytest.mark.asyncio
+async def test_options_flow_falls_back_to_default_timezone(caplog: pytest.LogCaptureFixture) -> None:
+    """Ensure the options flow falls back when Home Assistant lacks a timezone."""
+
+    handler = SecuremtrConfigFlow.async_get_options_flow(SimpleNamespace(options={}))
+    handler.hass = SimpleNamespace(config=SimpleNamespace(time_zone=None))
+
+    with caplog.at_level(logging.WARNING):
+        result = await handler.async_step_init(
+            {
+                CONF_PRIMARY_ANCHOR: time(4, 30),
+                CONF_BOOST_ANCHOR: time(19, 0, 15),
+                CONF_ANCHOR_STRATEGY: "fixed",
+                CONF_ELEMENT_POWER_KW: 3.25,
+                CONF_PREFER_DEVICE_ENERGY: False,
+            }
+        )
+
+    assert result["type"] == FlowResultType.CREATE_ENTRY
+    assert result["data"][CONF_TIME_ZONE] == DEFAULT_TIMEZONE
+    assert "timezone unavailable" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_options_flow_handles_invalid_home_assistant_timezone(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Ensure the options flow logs and falls back when the Home Assistant timezone is invalid."""
+
+    handler = SecuremtrConfigFlow.async_get_options_flow(SimpleNamespace(options={}))
+    handler.hass = SimpleNamespace(config=SimpleNamespace(time_zone="Mars/Olympus"))
+
+    with caplog.at_level(logging.WARNING):
+        result = await handler.async_step_init(
+            {
+                CONF_PRIMARY_ANCHOR: time(4, 30),
+                CONF_BOOST_ANCHOR: time(19, 0, 15),
+                CONF_ANCHOR_STRATEGY: "fixed",
+                CONF_ELEMENT_POWER_KW: 3.25,
+                CONF_PREFER_DEVICE_ENERGY: False,
+            }
+        )
+
+    assert result["type"] == FlowResultType.CREATE_ENTRY
+    assert result["data"][CONF_TIME_ZONE] == DEFAULT_TIMEZONE
+    assert "Invalid Home Assistant timezone" in caplog.text
 
 
 def test_anchor_option_to_time_variants(caplog: pytest.LogCaptureFixture) -> None:

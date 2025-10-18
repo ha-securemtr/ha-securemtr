@@ -10,7 +10,7 @@ custom_components.securemtr.__init__._async_fetch_controller: Retrieve controlle
 custom_components.securemtr.__init__._build_controller: Translate metadata and gateway context into a controller object.
 custom_components.securemtr.__init__.consumption_metrics: Import daily energy and runtime statistics with schedule-derived anchors and persist cumulative state.
 custom_components.securemtr.__init__._statistics_store_key: Return the persistent storage key for statistics state.
-custom_components.securemtr.__init__._load_statistics_options: Derive statistics options from the configuration entry.
+custom_components.securemtr.__init__._load_statistics_options: Derive statistics options from the configuration entry using the Home Assistant timezone when available.
 custom_components.securemtr.__init__._read_zone_program: Fetch the weekly program for a zone, returning None on failure.
 custom_components.securemtr.__init__._load_zone_state: Return the persisted cumulative sum and last processed day.
 custom_components.securemtr.__init__._store_zone_state: Persist the updated cumulative state for a zone.
@@ -25,6 +25,7 @@ custom_components.securemtr.config_flow._anchor_option_to_time: Return an anchor
 custom_components.securemtr.config_flow._serialize_anchor: Return an ISO-formatted anchor string for storage.
 custom_components.securemtr.config_flow.SecuremtrConfigFlow.async_get_options_flow: Return the options flow handler for SecureMTR.
 custom_components.securemtr.config_flow.SecuremtrOptionsFlowHandler.__init__: Initialise the options flow with the stored config entry.
+custom_components.securemtr.config_flow.SecuremtrOptionsFlowHandler._resolve_install_timezone: Return the Home Assistant installation timezone.
 custom_components.securemtr.config_flow.SecuremtrOptionsFlowHandler.async_step_init: Handle SecureMTR options for runtime statistics.
 custom_components.securemtr.beanbag.BeanbagHttpClient.login: Execute the documented Beanbag login flow while emitting sanitized diagnostics and validating the response payload.
 custom_components.securemtr.beanbag.BeanbagHttpClient._parse_gateway: Translate raw gateway payload into an object.

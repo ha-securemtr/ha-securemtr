@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 from dataclasses import dataclass, field
 from datetime import datetime, time, timezone
 from itertools import accumulate
@@ -19,6 +20,7 @@ from custom_components.securemtr import (
     _entry_display_name,
     _async_fetch_controller,
     _build_controller,
+    _load_statistics_options,
     async_dispatch_runtime_update,
     coerce_end_time,
     async_setup_entry,
@@ -62,6 +64,7 @@ class DummyConfigEntry:
     unique_id: str | None = None
     title: str | None = None
     options: dict[str, Any] = field(default_factory=dict)
+    hass: Any | None = None
 
 
 class FakeWebSocket:
@@ -339,6 +342,7 @@ class FakeHass:
         self.data: dict[str, dict[str, SecuremtrRuntimeData]] = {}
         self._tasks: list[asyncio.Task[Any]] = []
         self.config_entries = FakeConfigEntries()
+        self.config = SimpleNamespace(time_zone=DEFAULT_TIMEZONE)
 
     def async_create_task(self, coro: Awaitable[Any]) -> asyncio.Task[Any]:
         """Schedule a coroutine on the running loop and keep a reference."""
@@ -1216,6 +1220,64 @@ async def test_consumption_metrics_honours_start_anchor_strategy(
     metadata, boost_stats = capture_statistics[boost_id]
     assert metadata["has_sum"] is True
     assert boost_stats[0]["start"] == safe_anchor_datetime(first_day, time(17, 0), tz)
+
+
+def test_load_statistics_options_prefers_hass_timezone() -> None:
+    """Ensure statistics options honour the Home Assistant timezone."""
+
+    hass = FakeHass()
+    hass.config.time_zone = "Europe/London"
+    entry = DummyConfigEntry(entry_id="tz-pref", data={}, options={})
+    entry.hass = hass
+
+    options = _load_statistics_options(entry)
+
+    assert options.timezone_name == "Europe/London"
+
+
+def test_load_statistics_options_invalid_hass_timezone(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Ensure invalid Home Assistant timezones fall back to the default."""
+
+    hass = FakeHass()
+    hass.config.time_zone = "Mars/Olympus"
+    entry = DummyConfigEntry(entry_id="tz-invalid", data={}, options={})
+    entry.hass = hass
+
+    with caplog.at_level(logging.WARNING):
+        options = _load_statistics_options(entry)
+
+    assert options.timezone_name == DEFAULT_TIMEZONE
+    assert "Invalid timezone" in caplog.text
+
+
+def test_load_statistics_options_missing_system_database(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Ensure missing system time zone data falls back to the default time zone."""
+
+    hass = FakeHass()
+    hass.config.time_zone = "Mars/Olympus"
+    entry = DummyConfigEntry(entry_id="tz-missing", data={}, options={})
+    entry.hass = hass
+
+    monkeypatch.setattr(
+        "custom_components.securemtr.dt_util.get_time_zone", lambda _name: None
+    )
+    monkeypatch.setattr(
+        "custom_components.securemtr.dt_util.get_default_time_zone",
+        lambda: timezone.utc,
+    )
+    monkeypatch.setattr(
+        "custom_components.securemtr.dt_util.utcnow",
+        lambda: datetime.now(timezone.utc),
+    )
+
+    options = _load_statistics_options(entry)
+
+    assert options.timezone_name == "UTC"
+
 
 @pytest.mark.asyncio
 async def test_consumption_metrics_missing_runtime() -> None:

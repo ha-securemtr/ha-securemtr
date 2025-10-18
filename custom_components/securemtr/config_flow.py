@@ -11,6 +11,7 @@ from homeassistant import config_entries
 from homeassistant.helpers import config_validation as cv
 from homeassistant.const import CONF_EMAIL, CONF_PASSWORD, CONF_TIME_ZONE
 from homeassistant.data_entry_flow import FlowResult
+from homeassistant.util import dt as dt_util
 import voluptuous as vol
 
 from . import DOMAIN
@@ -132,16 +133,41 @@ class SecuremtrOptionsFlowHandler(config_entries.OptionsFlow):
         super().__init__()
         self._config_entry = config_entry
 
+    def _resolve_install_timezone(self) -> str:
+        """Return the Home Assistant installation timezone."""
+
+        hass_timezone: str | None = None
+        if self.hass is not None:
+            hass_timezone = getattr(self.hass.config, "time_zone", None)
+
+        if hass_timezone:
+            timezone = dt_util.get_time_zone(hass_timezone)
+            if timezone is not None:
+                return hass_timezone
+            _LOGGER.warning(
+                "Invalid Home Assistant timezone %s; using default %s",
+                hass_timezone,
+                DEFAULT_TIMEZONE,
+            )
+        else:
+            _LOGGER.warning(
+                "Home Assistant timezone unavailable; using default %s",
+                DEFAULT_TIMEZONE,
+            )
+
+        return DEFAULT_TIMEZONE
+
     async def async_step_init(
         self, user_input: dict[str, Any] | None = None
     ) -> FlowResult:
         """Handle SecureMTR options for runtime statistics."""
 
         if user_input is not None:
+            timezone_name = self._resolve_install_timezone()
             return self.async_create_entry(
                 title="",
                 data={
-                    CONF_TIME_ZONE: user_input[CONF_TIME_ZONE],
+                    CONF_TIME_ZONE: timezone_name,
                     CONF_PRIMARY_ANCHOR: _serialize_anchor(
                         user_input[CONF_PRIMARY_ANCHOR]
                     ),
@@ -159,10 +185,6 @@ class SecuremtrOptionsFlowHandler(config_entries.OptionsFlow):
 
         schema = vol.Schema(
             {
-                vol.Required(
-                    CONF_TIME_ZONE,
-                    default=options.get(CONF_TIME_ZONE, DEFAULT_TIMEZONE),
-                ): cv.time_zone,
                 vol.Required(
                     CONF_PRIMARY_ANCHOR,
                     default=_anchor_option_to_time(
