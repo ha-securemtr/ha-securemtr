@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Iterable, Sequence
+from contextlib import suppress
 from dataclasses import dataclass
 import logging
 import secrets
@@ -10,6 +11,7 @@ import time
 from typing import Any, Literal
 
 from aiohttp import (
+    ClientConnectionError,
     ClientError,
     ClientSession,
     ClientWebSocketResponse,
@@ -1198,7 +1200,18 @@ class BeanbagBackend:
             sanitized_parameters[1:] if len(sanitized_parameters) > 1 else (),
         )
 
-        await websocket.send_json(payload)
+        try:
+            await websocket.send_json(payload)
+        except ClientConnectionError as error:
+            _LOGGER.warning(
+                "Beanbag WebSocket send failed due to transport error: %s", error
+            )
+            if not websocket.closed:
+                with suppress(Exception):
+                    await websocket.close()
+            raise BeanbagWebSocketError(
+                "Beanbag WebSocket transport is unavailable"
+            ) from error
 
         while True:
             message = await websocket.receive_json()

@@ -22,6 +22,7 @@ from custom_components.securemtr import (
     _build_controller,
     _load_statistics_options,
     async_dispatch_runtime_update,
+    async_run_with_reconnect,
     coerce_end_time,
     async_setup_entry,
     async_unload_entry,
@@ -310,6 +311,95 @@ class FakeBeanbagBackend:
         """Pretend to send the power-off command."""
 
         self.state_calls.append(f"off:{gateway_id}")
+
+
+@pytest.mark.asyncio
+async def test_async_run_with_reconnect_retries_operation() -> None:
+    """Ensure the reconnect helper retries once after a Beanbag error."""
+
+    class ReconnectingBackend(FakeBeanbagBackend):
+        def __init__(self, session: object) -> None:
+            super().__init__(session)
+            self.websocket = FakeWebSocket()
+
+        async def login_and_connect(
+            self, email: str, password_digest: str
+        ) -> tuple[BeanbagSession, FakeWebSocket]:
+            self.login_calls.append((email, password_digest))
+            self.websocket = FakeWebSocket()
+            return self._session, self.websocket
+
+    backend = ReconnectingBackend(object())
+    runtime = SecuremtrRuntimeData(backend=backend)
+    runtime.session = backend._session
+    runtime.websocket = backend.websocket
+
+    entry = DummyConfigEntry(
+        entry_id="reconnect",
+        data={"email": "user@example.com", "password": "digest"},
+    )
+
+    first_socket = runtime.websocket
+    attempts = 0
+
+    async def _operation(
+        backend_obj: FakeBeanbagBackend,
+        session: BeanbagSession,
+        websocket: FakeWebSocket,
+    ) -> str:
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            raise BeanbagError("send failure")
+        assert session is backend._session
+        assert websocket is backend.websocket
+        return "ok"
+
+    result = await async_run_with_reconnect(entry, runtime, _operation)
+
+    assert result == "ok"
+    assert attempts == 2
+    assert backend.login_calls == [("user@example.com", "digest")]
+    assert first_socket.close_calls == 1
+    assert runtime.websocket is backend.websocket
+    assert runtime.websocket.closed is False
+
+
+@pytest.mark.asyncio
+async def test_async_run_with_reconnect_propagates_when_refresh_fails() -> None:
+    """Ensure the helper raises the original error if reconnection fails."""
+
+    class FailingBackend(FakeBeanbagBackend):
+        async def login_and_connect(
+            self, email: str, password_digest: str
+        ) -> tuple[BeanbagSession, FakeWebSocket]:
+            self.login_calls.append((email, password_digest))
+            raise BeanbagError("login failed")
+
+    backend = FailingBackend(object())
+    runtime = SecuremtrRuntimeData(backend=backend)
+    runtime.session = backend._session
+    runtime.websocket = backend.websocket
+
+    entry = DummyConfigEntry(
+        entry_id="reconnect-fail",
+        data={"email": "user@example.com", "password": "digest"},
+    )
+
+    async def _operation(
+        backend_obj: FakeBeanbagBackend,
+        session: BeanbagSession,
+        websocket: FakeWebSocket,
+    ) -> None:
+        raise BeanbagError("initial failure")
+
+    with pytest.raises(BeanbagError) as excinfo:
+        await async_run_with_reconnect(entry, runtime, _operation)
+
+    assert str(excinfo.value) == "initial failure"
+    assert backend.login_calls == [("user@example.com", "digest")]
+    assert backend.websocket.closed is True
+    assert runtime.websocket is None
 
 
 class FakeConfigEntries:

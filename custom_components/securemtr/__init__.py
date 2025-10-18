@@ -3,12 +3,12 @@
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Callable, Iterable
+from collections.abc import Awaitable, Callable, Iterable
 from contextlib import suppress
 from dataclasses import dataclass, field
 from datetime import date, datetime, time, timedelta, tzinfo
 import logging
-from typing import Any
+from typing import Any, TypeVar
 
 from aiohttp import ClientWebSocketResponse
 from homeassistant.config_entries import ConfigEntry
@@ -59,6 +59,9 @@ _RUNTIME_UPDATE_SIGNAL = "securemtr_runtime_update"
 _LOGGER = logging.getLogger(__name__)
 
 STATISTICS_STORE_VERSION = 1
+
+
+_ResultT = TypeVar("_ResultT")
 
 
 @dataclass(slots=True)
@@ -382,6 +385,56 @@ async def _async_refresh_connection(
     runtime.websocket = websocket
     _LOGGER.info("Re-established Beanbag connection for %s", entry_identifier)
     return True
+
+
+async def _async_reset_connection(runtime: SecuremtrRuntimeData) -> None:
+    """Close the active Beanbag WebSocket and clear it from the runtime."""
+
+    websocket = runtime.websocket
+    if websocket is not None and not websocket.closed:
+        await websocket.close()
+
+    runtime.websocket = None
+
+
+async def async_run_with_reconnect(
+    entry: ConfigEntry,
+    runtime: SecuremtrRuntimeData,
+    operation: Callable[
+        [BeanbagBackend, BeanbagSession, ClientWebSocketResponse],
+        Awaitable[_ResultT],
+    ],
+) -> _ResultT:
+    """Execute a backend operation, retrying once after reconnecting."""
+
+    if not await _async_refresh_connection(entry, runtime):
+        raise BeanbagError("Beanbag connection is unavailable")
+
+    last_error: BeanbagError | None = None
+    for attempt in range(2):
+        session = runtime.session
+        websocket = runtime.websocket
+
+        if session is None or websocket is None:
+            raise BeanbagError("Beanbag session or websocket is unavailable")
+
+        try:
+            return await operation(runtime.backend, session, websocket)
+        except BeanbagError as error:
+            last_error = error
+            if attempt == 1:
+                break
+
+            _LOGGER.warning(
+                "Beanbag backend operation failed; attempting reconnection: %s",
+                error,
+            )
+            await _async_reset_connection(runtime)
+            if not await _async_refresh_connection(entry, runtime):
+                break
+
+    assert last_error is not None
+    raise last_error
 
 
 @dataclass(slots=True)
