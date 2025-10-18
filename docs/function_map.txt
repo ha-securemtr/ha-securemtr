@@ -15,7 +15,7 @@ custom_components.securemtr.__init__._read_zone_program: Fetch the weekly progra
 custom_components.securemtr.__init__._load_zone_state: Return the persisted cumulative sum and last processed day.
 custom_components.securemtr.__init__._store_zone_state: Persist the updated cumulative state for a zone.
 custom_components.securemtr.__init__._resolve_anchor: Select an anchor for the provided day and schedule context.
-custom_components.securemtr.__init__._build_statistic_metadata: Create metadata for a statistic export.
+custom_components.securemtr.__init__._build_statistic_metadata: Create metadata for a statistic export, optionally overriding the statistic ID.
 custom_components.securemtr.__init__._normalize_identifier: Return a sanitized identifier candidate when possible.
 custom_components.securemtr.__init__.runtime_update_signal: Return the dispatcher signal name for runtime updates.
 custom_components.securemtr.__init__.async_dispatch_runtime_update: Notify entities that runtime state has been updated.
