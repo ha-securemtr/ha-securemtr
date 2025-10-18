@@ -8,9 +8,10 @@ import logging
 from typing import Any
 
 from homeassistant import config_entries
-from homeassistant.helpers import config_validation as cv
 from homeassistant.const import CONF_EMAIL, CONF_PASSWORD, CONF_TIME_ZONE
 from homeassistant.data_entry_flow import FlowResult
+from homeassistant.helpers import config_validation as cv
+from homeassistant.helpers.selector import selector
 from homeassistant.util import dt as dt_util
 import voluptuous as vol
 
@@ -164,14 +165,18 @@ class SecuremtrOptionsFlowHandler(config_entries.OptionsFlow):
 
         if user_input is not None:
             timezone_name = self._resolve_install_timezone()
+            primary_anchor = _anchor_option_to_time(
+                user_input.get(CONF_PRIMARY_ANCHOR), _DEFAULT_PRIMARY_TIME
+            )
+            boost_anchor = _anchor_option_to_time(
+                user_input.get(CONF_BOOST_ANCHOR), _DEFAULT_BOOST_TIME
+            )
             return self.async_create_entry(
                 title="",
                 data={
                     CONF_TIME_ZONE: timezone_name,
-                    CONF_PRIMARY_ANCHOR: _serialize_anchor(
-                        user_input[CONF_PRIMARY_ANCHOR]
-                    ),
-                    CONF_BOOST_ANCHOR: _serialize_anchor(user_input[CONF_BOOST_ANCHOR]),
+                    CONF_PRIMARY_ANCHOR: _serialize_anchor(primary_anchor),
+                    CONF_BOOST_ANCHOR: _serialize_anchor(boost_anchor),
                     CONF_ANCHOR_STRATEGY: user_input[CONF_ANCHOR_STRATEGY],
                     CONF_ELEMENT_POWER_KW: user_input[CONF_ELEMENT_POWER_KW],
                     CONF_PREFER_DEVICE_ENERGY: user_input[CONF_PREFER_DEVICE_ENERGY],
@@ -183,20 +188,23 @@ class SecuremtrOptionsFlowHandler(config_entries.OptionsFlow):
         if anchor_strategy not in ANCHOR_STRATEGIES:
             anchor_strategy = DEFAULT_ANCHOR_STRATEGY
 
+        primary_anchor_default = _anchor_option_to_time(
+            options.get(CONF_PRIMARY_ANCHOR), _DEFAULT_PRIMARY_TIME
+        )
+        boost_anchor_default = _anchor_option_to_time(
+            options.get(CONF_BOOST_ANCHOR), _DEFAULT_BOOST_TIME
+        )
+
         schema = vol.Schema(
             {
                 vol.Required(
                     CONF_PRIMARY_ANCHOR,
-                    default=_anchor_option_to_time(
-                        options.get(CONF_PRIMARY_ANCHOR), _DEFAULT_PRIMARY_TIME
-                    ),
-                ): cv.time,
+                    default=primary_anchor_default,
+                ): selector({"time": {}}),
                 vol.Required(
                     CONF_BOOST_ANCHOR,
-                    default=_anchor_option_to_time(
-                        options.get(CONF_BOOST_ANCHOR), _DEFAULT_BOOST_TIME
-                    ),
-                ): cv.time,
+                    default=boost_anchor_default,
+                ): selector({"time": {}}),
                 vol.Required(
                     CONF_ANCHOR_STRATEGY, default=anchor_strategy
                 ): vol.In(ANCHOR_STRATEGIES),
