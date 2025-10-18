@@ -1488,6 +1488,21 @@ def test_build_controller_ignores_numeric_name() -> None:
     assert controller.serial_number == "E0031158"
 
 
+def test_build_controller_maps_numeric_model() -> None:
+    """Map numeric metadata model codes to friendly names."""
+
+    metadata = {"BOI": "controller", "SN": "serial", "N": "Unit", "MD": 2}
+    gateway = BeanbagGateway(
+        gateway_id="gateway-1",
+        serial_number=None,
+        host_name="host",
+        capabilities={},
+    )
+
+    controller = _build_controller(metadata, gateway)
+    assert controller.model == "E7+ Smart Water Heater Controller"
+
+
 def test_build_controller_skips_none_identifiers() -> None:
     """Ensure metadata values of None do not become literal identifiers."""
 
