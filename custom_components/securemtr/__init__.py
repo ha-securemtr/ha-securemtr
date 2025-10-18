@@ -11,6 +11,12 @@ import logging
 from typing import Any, TypeVar
 
 from aiohttp import ClientWebSocketResponse
+from homeassistant.components.recorder.statistics import (
+    StatisticData,
+    StatisticMeanType,
+    StatisticMetaData,
+    async_add_external_statistics,
+)
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import (
     CONF_EMAIL,
@@ -20,12 +26,6 @@ from homeassistant.const import (
     UnitOfTime,
 )
 from homeassistant.core import HomeAssistant
-from homeassistant.components.recorder.statistics import (
-    StatisticData,
-    StatisticMeanType,
-    StatisticMetaData,
-    async_add_external_statistics,
-)
 from homeassistant.helpers import entity_registry as er
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
 from homeassistant.helpers.dispatcher import async_dispatcher_send
@@ -739,7 +739,7 @@ async def consumption_metrics(hass: HomeAssistant, entry: ConfigEntry) -> None:
         ),
     }
 
-    from .entity import slugify_identifier  # Import lazily to avoid circular dependency.
+    from .entity import slugify_identifier  # Import lazily to avoid circular dependency.  # noqa: I001, PLC0415
 
     controller_identifier = controller.serial_number or controller.identifier
     controller_slug = slugify_identifier(controller_identifier)
@@ -757,6 +757,12 @@ async def consumption_metrics(hass: HomeAssistant, entry: ConfigEntry) -> None:
             )
             continue
         energy_statistic_ids[context.energy_suffix] = entity_id
+
+    suffix_zone_key: dict[str, str] = {}
+    for zone_key, context in contexts.items():
+        suffix_zone_key[context.energy_suffix] = zone_key
+        suffix_zone_key[context.runtime_suffix] = zone_key
+        suffix_zone_key[context.schedule_suffix] = zone_key
 
     calibrations: dict[str, EnergyCalibration] = {
         "primary": calibrate_energy_scale(
@@ -812,6 +818,8 @@ async def consumption_metrics(hass: HomeAssistant, entry: ConfigEntry) -> None:
     store_dirty = False
     runtime_updated = False
     recent_measurements: dict[str, Any] = dict(runtime.statistics_recent or {})
+
+    zone_last_days: dict[str, date | None] = {}
 
     for zone_key, context in contexts.items():
         calibration = calibrations[zone_key]
@@ -904,10 +912,22 @@ async def consumption_metrics(hass: HomeAssistant, entry: ConfigEntry) -> None:
                 else None,
                 "energy_sum": float(energy_sum),
             }
+        zone_last_days[zone_key] = last_day
 
     for suffix, definition in STATISTIC_DEFINITIONS.items():
         statistics = statistics_payload[suffix]
         if not statistics:
+            zone_key = suffix_zone_key.get(suffix)
+            zone_context = contexts.get(zone_key) if zone_key else None
+            zone_label = zone_context.label if zone_context is not None else "Unknown"
+            last_day = zone_last_days.get(zone_key) if zone_key else None
+            _LOGGER.debug(
+                "No statistics rows generated for %s (%s zone). last_day=%s processed_rows=%d",
+                entry_identifier,
+                zone_label,
+                last_day.isoformat() if isinstance(last_day, date) else None,
+                len(processed_rows),
+            )
             continue
         metadata = _build_statistic_metadata(
             entry_identifier,
@@ -944,7 +964,7 @@ def _statistics_store_key(entry: ConfigEntry) -> str:
 def _load_statistics_options(entry: ConfigEntry) -> StatisticsOptions:
     """Derive statistics options from the configuration entry."""
 
-    from .config_flow import (  # Import lazily to avoid circular dependency.
+    from .config_flow import (  # Import lazily to avoid circular dependency.  # noqa: PLC0415
         ANCHOR_STRATEGIES,
         CONF_ANCHOR_STRATEGY,
         CONF_BOOST_ANCHOR,
