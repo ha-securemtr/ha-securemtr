@@ -756,6 +756,13 @@ async def consumption_metrics(hass: HomeAssistant, entry: ConfigEntry) -> None:
                 entry_identifier,
             )
             continue
+        _LOGGER.debug(
+            "Resolved statistic entity for %s %s zone: unique_id=%s entity_id=%s",
+            entry_identifier,
+            zone_key,
+            unique_id,
+            entity_id,
+        )
         energy_statistic_ids[context.energy_suffix] = entity_id
 
     suffix_zone_key: dict[str, str] = {}
@@ -939,7 +946,18 @@ async def consumption_metrics(hass: HomeAssistant, entry: ConfigEntry) -> None:
         _LOGGER.info(
             "Importing %d statistic rows for %s", len(statistics), metadata["statistic_id"]
         )
-        async_add_external_statistics(hass, metadata, statistics)
+        try:
+            async_add_external_statistics(hass, metadata, statistics)
+        except Exception:  # pragma: no cover - defensive logging for production visibility
+            sample = statistics[:1]
+            _LOGGER.exception(
+                "Failed importing %d statistic rows for %s with metadata=%s sample=%s",
+                len(statistics),
+                metadata["statistic_id"],
+                metadata,
+                sample,
+            )
+            raise
 
     runtime.statistics_recent = recent_measurements
 
@@ -1161,8 +1179,10 @@ def _build_statistic_metadata(
     identifier = entry_identifier.strip() or entry_identifier
     fallback_object_id = f"{DOMAIN}_{entry_slug}_{suffix}"
     fallback_statistic_id = f"sensor.{fallback_object_id}"
+    valid_override = False
     if statistic_id_override and valid_entity_id(statistic_id_override):
         statistic_id = statistic_id_override
+        valid_override = True
     else:
         statistic_id = fallback_statistic_id
         if statistic_id_override:
@@ -1172,6 +1192,14 @@ def _build_statistic_metadata(
                 suffix,
                 statistic_id,
             )
+    _LOGGER.debug(
+        "Statistic metadata resolved for %s: override=%s valid_override=%s selected=%s fallback=%s",
+        suffix,
+        statistic_id_override,
+        valid_override,
+        statistic_id,
+        fallback_statistic_id,
+    )
     return {
         "source": DOMAIN,
         "name": f"{identifier} {definition.name}",
