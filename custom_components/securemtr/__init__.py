@@ -54,6 +54,10 @@ DOMAIN = "securemtr"
 
 DEFAULT_DEVICE_LABEL = "E7+ Smart Water Heater Controller"
 
+MODEL_ALIASES: dict[str, str] = {
+    "2": DEFAULT_DEVICE_LABEL,
+}
+
 _RUNTIME_UPDATE_SIGNAL = "securemtr_runtime_update"
 
 _LOGGER = logging.getLogger(__name__)
@@ -520,6 +524,8 @@ def _build_controller(
         if isinstance(model_value, (str, int, float)) and str(model_value).strip()
         else None
     )
+    if model:
+        model = MODEL_ALIASES.get(model, model)
 
     raw_name = metadata.get("N")
     if isinstance(raw_name, (str, int, float)):
