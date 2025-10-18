@@ -292,6 +292,7 @@ async def _async_start_backend(
 
     if not email or not password_digest:
         _LOGGER.error("Missing credentials for securemtr entry %s", entry_identifier)
+        runtime.controller_ready.set()
         return
 
     _LOGGER.info("Starting Beanbag backend for %s", entry_identifier)
@@ -304,6 +305,14 @@ async def _async_start_backend(
         _LOGGER.error(
             "Failed to initialize Beanbag backend for %s: %s", entry_identifier, error
         )
+        runtime.controller_ready.set()
+        return
+    except Exception:
+        _LOGGER.exception(
+            "Unexpected error while initializing Beanbag backend for %s",
+            entry_identifier,
+        )
+        runtime.controller_ready.set()
         return
 
     runtime.session = session

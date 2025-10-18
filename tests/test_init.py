@@ -684,6 +684,7 @@ async def test_async_setup_entry_handles_backend_error(
     runtime = hass.data[DOMAIN][entry.entry_id]
     assert runtime.session is None
     assert runtime.websocket is None
+    assert runtime.controller_ready.is_set()
 
 
 @pytest.mark.asyncio
@@ -761,6 +762,7 @@ async def test_async_setup_entry_missing_credentials(
     assert runtime.session is None
     assert runtime.websocket is None
     assert backend.login_calls == []
+    assert runtime.controller_ready.is_set()
 
 
 @pytest.mark.asyncio
