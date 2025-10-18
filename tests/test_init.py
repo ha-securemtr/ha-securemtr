@@ -132,6 +132,52 @@ def capture_statistics(monkeypatch: pytest.MonkeyPatch):
     return captured
 
 
+@pytest.fixture(autouse=True)
+def fake_entity_registry(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Provide a fake entity registry mapping SecureMTR energy sensors."""
+
+    class FakeRegistry:
+        def __init__(self) -> None:
+            self._entities: dict[tuple[str, str, str], str] = {}
+
+        def add(
+            self,
+            entity_id: str,
+            *,
+            domain: str,
+            platform: str,
+            unique_id: str,
+        ) -> None:
+            """Register a fake entity mapping."""
+
+            self._entities[(domain, platform, unique_id)] = entity_id
+
+        def async_get_entity_id(
+            self, domain: str, platform: str, unique_id: str
+        ) -> str | None:
+            """Return the entity ID for the provided lookup when available."""
+
+            return self._entities.get((domain, platform, unique_id))
+
+    registry = FakeRegistry()
+    registry.add(
+        "sensor.serial_1_primary_energy_total",
+        domain="sensor",
+        platform=DOMAIN,
+        unique_id="serial_1_primary_energy_total",
+    )
+    registry.add(
+        "sensor.serial_1_boost_energy_total",
+        domain="sensor",
+        platform=DOMAIN,
+        unique_id="serial_1_boost_energy_total",
+    )
+
+    monkeypatch.setattr(
+        "homeassistant.helpers.entity_registry.async_get", lambda hass: registry
+    )
+
+
 class FakeBeanbagBackend:
     """Capture login requests and provide canned responses."""
 
@@ -1019,8 +1065,8 @@ async def test_consumption_metrics_refreshes_history(
 
     entry_slug = slugify_identifier(entry.title or entry.entry_id)
     stat_ids = {
-        f"{DOMAIN}:{entry_slug}:primary_energy_kwh",
-        f"{DOMAIN}:{entry_slug}:boost_energy_kwh",
+        "sensor.serial_1_primary_energy_total",
+        "sensor.serial_1_boost_energy_total",
         f"{DOMAIN}:{entry_slug}:primary_runtime_h",
         f"{DOMAIN}:{entry_slug}:primary_sched_h",
         f"{DOMAIN}:{entry_slug}:boost_runtime_h",
@@ -1049,13 +1095,13 @@ async def test_consumption_metrics_refreshes_history(
             assert entry["sum"] == pytest.approx(cumulative[index])
 
     _assert_energy(
-        f"{DOMAIN}:{entry_slug}:primary_energy_kwh",
+        "sensor.serial_1_primary_energy_total",
         primary_energy,
         primary_cumulative,
         time(3, 0),
     )
     _assert_energy(
-        f"{DOMAIN}:{entry_slug}:boost_energy_kwh",
+        "sensor.serial_1_boost_energy_total",
         boost_energy,
         boost_cumulative,
         time(17, 30),
@@ -1217,9 +1263,8 @@ async def test_consumption_metrics_imports_only_new_days(
 
     await consumption_metrics(hass, entry)
 
-    entry_slug = slugify_identifier(entry.title or entry.entry_id)
-    primary_id = f"{DOMAIN}:{entry_slug}:primary_energy_kwh"
-    boost_id = f"{DOMAIN}:{entry_slug}:boost_energy_kwh"
+    primary_id = "sensor.serial_1_primary_energy_total"
+    boost_id = "sensor.serial_1_boost_energy_total"
 
     expected_days = [
         report_day_for_sample(base_timestamp + offset * 86_400, tz)
@@ -1294,9 +1339,8 @@ async def test_consumption_metrics_honours_start_anchor_strategy(
 
     await consumption_metrics(hass, entry)
 
-    entry_slug = slugify_identifier(entry.title or entry.entry_id)
-    primary_id = f"{DOMAIN}:{entry_slug}:primary_energy_kwh"
-    boost_id = f"{DOMAIN}:{entry_slug}:boost_energy_kwh"
+    primary_id = "sensor.serial_1_primary_energy_total"
+    boost_id = "sensor.serial_1_boost_energy_total"
 
     tz = dt_util.get_time_zone(DEFAULT_TIMEZONE)
     assert tz is not None

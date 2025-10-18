@@ -26,6 +26,7 @@ from homeassistant.components.recorder.statistics import (
     StatisticMetaData,
     async_add_external_statistics,
 )
+from homeassistant.helpers import entity_registry as er
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
 from homeassistant.helpers.dispatcher import async_dispatcher_send
 from homeassistant.helpers.event import async_track_time_change
@@ -738,6 +739,25 @@ async def consumption_metrics(hass: HomeAssistant, entry: ConfigEntry) -> None:
         ),
     }
 
+    from .entity import slugify_identifier  # Import lazily to avoid circular dependency.
+
+    controller_identifier = controller.serial_number or controller.identifier
+    controller_slug = slugify_identifier(controller_identifier)
+    energy_statistic_ids: dict[str, str] = {}
+
+    registry = er.async_get(hass)
+    for zone_key, context in contexts.items():
+        unique_id = f"{controller_slug}_{zone_key}_energy_total"
+        entity_id = registry.async_get_entity_id("sensor", DOMAIN, unique_id)
+        if entity_id is None:
+            _LOGGER.debug(
+                "Energy sensor unique ID %s not found in entity registry for %s",
+                unique_id,
+                entry_identifier,
+            )
+            continue
+        energy_statistic_ids[context.energy_suffix] = entity_id
+
     calibrations: dict[str, EnergyCalibration] = {
         "primary": calibrate_energy_scale(
             processed_rows,
@@ -787,8 +807,6 @@ async def consumption_metrics(hass: HomeAssistant, entry: ConfigEntry) -> None:
     statistics_payload: dict[str, list[StatisticData]] = {
         suffix: [] for suffix in STATISTIC_DEFINITIONS
     }
-
-    from .entity import slugify_identifier
 
     entry_slug = slugify_identifier(entry_identifier)
     store_dirty = False
@@ -892,7 +910,11 @@ async def consumption_metrics(hass: HomeAssistant, entry: ConfigEntry) -> None:
         if not statistics:
             continue
         metadata = _build_statistic_metadata(
-            entry_identifier, entry_slug, suffix, definition
+            entry_identifier,
+            entry_slug,
+            suffix,
+            definition,
+            statistic_id_override=energy_statistic_ids.get(suffix),
         )
         _LOGGER.info(
             "Importing %d statistic rows for %s", len(statistics), metadata["statistic_id"]
@@ -1111,14 +1133,17 @@ def _build_statistic_metadata(
     entry_slug: str,
     suffix: str,
     definition: StatisticDefinition,
+    *,
+    statistic_id_override: str | None = None,
 ) -> StatisticMetaData:
     """Create metadata for a statistic export."""
 
     identifier = entry_identifier.strip() or entry_identifier
+    statistic_id = statistic_id_override or f"{DOMAIN}:{entry_slug}:{suffix}"
     return {
         "source": DOMAIN,
         "name": f"{identifier} {definition.name}",
-        "statistic_id": f"{DOMAIN}:{entry_slug}:{suffix}",
+        "statistic_id": statistic_id,
         "unit_of_measurement": definition.unit,
         "has_sum": definition.has_sum,
         "mean_type": definition.mean_type,
