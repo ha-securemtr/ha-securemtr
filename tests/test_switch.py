@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 from dataclasses import dataclass
 from types import SimpleNamespace
-from typing import Any
+from typing import Any, Awaitable, Callable
 
 import pytest
 
@@ -134,6 +134,20 @@ async def test_switch_setup_creates_entity(monkeypatch: pytest.MonkeyPatch) -> N
     assert power_switch.is_on is False
     assert timed_switch.is_on is False
 
+    async def _fake_run_with_reconnect(
+        entry_obj: DummyEntry,
+        runtime_obj: SecuremtrRuntimeData,
+        operation: Callable[[Any, Any, Any], Awaitable[Any]],
+    ) -> Any:
+        if runtime_obj.session is None or runtime_obj.websocket is None:
+            raise BeanbagError("no connection")
+        return await operation(runtime_obj.backend, runtime_obj.session, runtime_obj.websocket)
+
+    monkeypatch.setattr(
+        "custom_components.securemtr.switch.async_run_with_reconnect",
+        _fake_run_with_reconnect,
+    )
+
     monkeypatch.setattr(
         "custom_components.securemtr.switch.async_dispatch_runtime_update",
         lambda hass_obj, entry_id: None,
@@ -208,7 +222,7 @@ def test_switch_device_info_without_serial() -> None:
         model=None,
     )
 
-    switch = SecuremtrPowerSwitch(runtime, controller, "entry")
+    switch = SecuremtrPowerSwitch(runtime, controller, DummyEntry("entry"))
     device_info = switch.device_info
     assert device_info["name"] == "E7+ Smart Water Heater Controller"
     assert device_info["serial_number"] is None
@@ -245,7 +259,9 @@ async def test_switch_setup_requires_controller() -> None:
 
 
 @pytest.mark.asyncio
-async def test_switch_turn_on_requires_connection() -> None:
+async def test_switch_turn_on_requires_connection(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """Ensure the switch raises when the runtime lacks a live connection."""
 
     runtime, backend = _create_runtime()
@@ -255,6 +271,18 @@ async def test_switch_turn_on_requires_connection() -> None:
     entities: list[SwitchEntity] = []
 
     await async_setup_entry(hass, entry, entities.extend)
+
+    async def _fake_run_with_reconnect(
+        entry_obj: DummyEntry,
+        runtime_obj: SecuremtrRuntimeData,
+        operation: Callable[[Any, Any, Any], Awaitable[Any]],
+    ) -> Any:
+        raise BeanbagError("no connection")
+
+    monkeypatch.setattr(
+        "custom_components.securemtr.switch.async_run_with_reconnect",
+        _fake_run_with_reconnect,
+    )
 
     power_switch = next(
         entity for entity in entities if entity.unique_id.endswith("primary_power")
@@ -266,7 +294,48 @@ async def test_switch_turn_on_requires_connection() -> None:
 
 
 @pytest.mark.asyncio
-async def test_timed_boost_requires_connection() -> None:
+async def test_switch_turn_on_requires_controller(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Ensure the power switch validates controller availability."""
+
+    runtime, backend = _create_runtime()
+    hass = SimpleNamespace(data={DOMAIN: {"entry": runtime}})
+    entry = DummyEntry(entry_id="entry")
+    entities: list[SwitchEntity] = []
+
+    await async_setup_entry(hass, entry, entities.extend)
+
+    async def _fake_run_with_reconnect(
+        entry_obj: DummyEntry,
+        runtime_obj: SecuremtrRuntimeData,
+        operation: Callable[[Any, Any, Any], Awaitable[Any]],
+    ) -> Any:
+        if runtime_obj.session is None or runtime_obj.websocket is None:
+            raise BeanbagError("no connection")
+        return await operation(runtime_obj.backend, runtime_obj.session, runtime_obj.websocket)
+
+    monkeypatch.setattr(
+        "custom_components.securemtr.switch.async_run_with_reconnect",
+        _fake_run_with_reconnect,
+    )
+
+    power_switch = next(
+        entity for entity in entities if entity.unique_id.endswith("primary_power")
+    )
+
+    runtime.controller = None
+
+    with pytest.raises(HomeAssistantError):
+        await power_switch.async_turn_on()
+
+    assert backend.on_calls == []
+
+
+@pytest.mark.asyncio
+async def test_timed_boost_requires_connection(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """Ensure the timed boost switch raises when the runtime lacks a connection."""
 
     runtime, backend = _create_runtime()
@@ -277,9 +346,60 @@ async def test_timed_boost_requires_connection() -> None:
 
     await async_setup_entry(hass, entry, entities.extend)
 
+    async def _fake_run_with_reconnect(
+        entry_obj: DummyEntry,
+        runtime_obj: SecuremtrRuntimeData,
+        operation: Callable[[Any, Any, Any], Awaitable[Any]],
+    ) -> Any:
+        raise BeanbagError("no connection")
+
+    monkeypatch.setattr(
+        "custom_components.securemtr.switch.async_run_with_reconnect",
+        _fake_run_with_reconnect,
+    )
+
     timed_switch = next(
         entity for entity in entities if entity.unique_id.endswith("timed_boost")
     )
+
+    with pytest.raises(HomeAssistantError):
+        await timed_switch.async_turn_on()
+
+    assert backend.timed_boost_calls == []
+
+
+@pytest.mark.asyncio
+async def test_timed_boost_requires_controller(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Ensure the timed boost switch validates controller availability."""
+
+    runtime, backend = _create_runtime()
+    hass = SimpleNamespace(data={DOMAIN: {"entry": runtime}})
+    entry = DummyEntry(entry_id="entry")
+    entities: list[SwitchEntity] = []
+
+    await async_setup_entry(hass, entry, entities.extend)
+
+    async def _fake_run_with_reconnect(
+        entry_obj: DummyEntry,
+        runtime_obj: SecuremtrRuntimeData,
+        operation: Callable[[Any, Any, Any], Awaitable[Any]],
+    ) -> Any:
+        if runtime_obj.session is None or runtime_obj.websocket is None:
+            raise BeanbagError("no connection")
+        return await operation(runtime_obj.backend, runtime_obj.session, runtime_obj.websocket)
+
+    monkeypatch.setattr(
+        "custom_components.securemtr.switch.async_run_with_reconnect",
+        _fake_run_with_reconnect,
+    )
+
+    timed_switch = next(
+        entity for entity in entities if entity.unique_id.endswith("timed_boost")
+    )
+
+    runtime.controller = None
 
     with pytest.raises(HomeAssistantError):
         await timed_switch.async_turn_on()
@@ -302,6 +422,20 @@ async def test_timed_boost_backend_error(monkeypatch: pytest.MonkeyPatch) -> Non
         entity for entity in entities if entity.unique_id.endswith("timed_boost")
     )
 
+    async def _fake_run_with_reconnect(
+        entry_obj: DummyEntry,
+        runtime_obj: SecuremtrRuntimeData,
+        operation: Callable[[Any, Any, Any], Awaitable[Any]],
+    ) -> Any:
+        if runtime_obj.session is None or runtime_obj.websocket is None:
+            raise BeanbagError("no connection")
+        return await operation(runtime_obj.backend, runtime_obj.session, runtime_obj.websocket)
+
+    monkeypatch.setattr(
+        "custom_components.securemtr.switch.async_run_with_reconnect",
+        _fake_run_with_reconnect,
+    )
+
     async def _raise(*args: Any, **kwargs: Any) -> None:
         raise BeanbagError("fail")
 
@@ -314,7 +448,9 @@ async def test_timed_boost_backend_error(monkeypatch: pytest.MonkeyPatch) -> Non
 
 
 @pytest.mark.asyncio
-async def test_switch_turn_on_handles_backend_error() -> None:
+async def test_switch_turn_on_handles_backend_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """Verify Beanbag errors propagate as Home Assistant errors."""
 
     runtime, _backend = _create_runtime()
@@ -331,6 +467,20 @@ async def test_switch_turn_on_handles_backend_error() -> None:
     entities: list[SecuremtrPowerSwitch] = []
 
     await async_setup_entry(hass, entry, entities.extend)
+
+    async def _fake_run_with_reconnect(
+        entry_obj: DummyEntry,
+        runtime_obj: SecuremtrRuntimeData,
+        operation: Callable[[Any, Any, Any], Awaitable[Any]],
+    ) -> Any:
+        if runtime_obj.session is None or runtime_obj.websocket is None:
+            raise BeanbagError("no connection")
+        return await operation(runtime_obj.backend, runtime_obj.session, runtime_obj.websocket)
+
+    monkeypatch.setattr(
+        "custom_components.securemtr.switch.async_run_with_reconnect",
+        _fake_run_with_reconnect,
+    )
 
     switch = entities[0]
     with pytest.raises(HomeAssistantError):
@@ -350,7 +500,7 @@ async def test_switch_async_added_to_hass(monkeypatch: pytest.MonkeyPatch) -> No
     """Ensure dispatcher callbacks are registered during entity setup."""
 
     runtime, _backend = _create_runtime()
-    switch = SecuremtrPowerSwitch(runtime, runtime.controller, "entry")
+    switch = SecuremtrPowerSwitch(runtime, runtime.controller, DummyEntry("entry"))
     switch.hass = SimpleNamespace()
 
     added_calls: list[SecuremtrPowerSwitch] = []

@@ -8,7 +8,7 @@ import sys
 from unittest.mock import AsyncMock, Mock
 
 import pytest
-from aiohttp import ClientError
+from aiohttp import ClientConnectionResetError, ClientError
 
 # Ensure the integration package can be imported without installation.
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -1560,6 +1560,52 @@ async def test_backend_send_request_handles_informational_frames(
         )
 
     assert websocket.sent
+
+
+@pytest.mark.asyncio
+async def test_backend_send_request_closes_on_send_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Convert transport errors during send into Beanbag exceptions."""
+
+    session_data = BeanbagSession(
+        user_id=1,
+        session_id="abc",
+        token="jwt",
+        token_timestamp=None,
+        gateways=(),
+    )
+
+    class ClosingWebSocket:
+        def __init__(self) -> None:
+            self.closed = False
+            self.close_calls = 0
+
+        async def send_json(self, payload: dict[str, Any]) -> None:
+            raise ClientConnectionResetError("closing transport")
+
+        async def close(self) -> None:
+            self.closed = True
+            self.close_calls += 1
+
+    websocket = ClosingWebSocket()
+    backend = BeanbagBackend(Mock())
+    monkeypatch.setattr(
+        "custom_components.securemtr.beanbag.secrets.randbits", lambda bits: 1
+    )
+    monkeypatch.setattr("custom_components.securemtr.beanbag.time.time", lambda: 1000)
+
+    with pytest.raises(BeanbagWebSocketError):
+        await backend._send_request(  # type: ignore[attr-defined]
+            session_data,
+            websocket,  # type: ignore[arg-type]
+            "gateway-1",
+            header_hi=1,
+            header_si=2,
+        )
+
+    assert websocket.closed is True
+    assert websocket.close_calls == 1
 
 
 @pytest.mark.asyncio

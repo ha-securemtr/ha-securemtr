@@ -7,7 +7,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 import logging
 from types import SimpleNamespace
-from typing import Any
+from typing import Any, Awaitable, Callable
 
 import pytest
 
@@ -103,6 +103,28 @@ def _create_runtime() -> tuple[SecuremtrRuntimeData, DummyBackend]:
     runtime.timed_boost_enabled = True
     runtime.controller_ready.set()
     return runtime, backend
+
+
+@pytest.fixture(autouse=True)
+def patch_reconnect(
+    monkeypatch: pytest.MonkeyPatch,
+) -> Callable[[DummyEntry, SecuremtrRuntimeData, Callable[[Any, Any, Any], Awaitable[Any]]], Awaitable[Any]]:
+    """Stub the reconnect helper to operate on the dummy runtime."""
+
+    async def _fake_run_with_reconnect(
+        entry: DummyEntry,
+        runtime: SecuremtrRuntimeData,
+        operation: Callable[[Any, Any, Any], Awaitable[Any]],
+    ) -> Any:
+        if runtime.session is None or runtime.websocket is None:
+            raise BeanbagError("no connection")
+        return await operation(runtime.backend, runtime.session, runtime.websocket)
+
+    monkeypatch.setattr(
+        "custom_components.securemtr.button.async_run_with_reconnect",
+        _fake_run_with_reconnect,
+    )
+    return _fake_run_with_reconnect
 
 
 @pytest.mark.asyncio
@@ -219,6 +241,29 @@ async def test_boost_button_requires_connection() -> None:
 
 
 @pytest.mark.asyncio
+async def test_boost_button_requires_controller() -> None:
+    """Ensure the timed boost button validates controller availability."""
+
+    runtime, backend = _create_runtime()
+    hass = SimpleNamespace(data={DOMAIN: {"entry": runtime}})
+    entry = DummyEntry(entry_id="entry")
+    entities: list[ButtonEntity] = []
+
+    await async_setup_entry(hass, entry, entities.extend)
+
+    boost_button = next(
+        entity for entity in entities if entity.unique_id.endswith("boost_30")
+    )
+
+    runtime.controller = None
+
+    with pytest.raises(HomeAssistantError):
+        await boost_button.async_press()
+
+    assert backend.start_calls == []
+
+
+@pytest.mark.asyncio
 async def test_schedule_button_logs_program(caplog: pytest.LogCaptureFixture) -> None:
     """Log both weekly programs when the schedule button is pressed."""
 
@@ -298,6 +343,34 @@ async def test_schedule_button_requires_connection() -> None:
     schedule_button = next(
         entity for entity in entities if entity.unique_id.endswith("log_schedule")
     )
+
+    with pytest.raises(HomeAssistantError):
+        await schedule_button.async_press()
+
+    assert backend.read_calls == []
+
+
+@pytest.mark.asyncio
+async def test_schedule_button_requires_controller() -> None:
+    """Ensure the schedule button verifies controller availability."""
+
+    runtime, backend = _create_runtime()
+    hass = SimpleNamespace(data={DOMAIN: {"entry": runtime}})
+    entry = DummyEntry(entry_id="entry")
+    entities: list[ButtonEntity] = []
+
+    backend.weekly_programs = {
+        "primary": (DailyProgram((None, None, None), (None, None, None)),) * 7,
+        "boost": (DailyProgram((None, None, None), (None, None, None)),) * 7,
+    }
+
+    await async_setup_entry(hass, entry, entities.extend)
+
+    schedule_button = next(
+        entity for entity in entities if entity.unique_id.endswith("log_schedule")
+    )
+
+    runtime.controller = None
 
     with pytest.raises(HomeAssistantError):
         await schedule_button.async_press()
@@ -397,6 +470,30 @@ async def test_cancel_button_requires_connection() -> None:
     cancel_button = next(
         entity for entity in entities if entity.unique_id.endswith("boost_cancel")
     )
+
+    with pytest.raises(HomeAssistantError):
+        await cancel_button.async_press()
+
+    assert backend.stop_calls == []
+
+
+@pytest.mark.asyncio
+async def test_cancel_button_requires_controller() -> None:
+    """Ensure the cancel button validates controller availability."""
+
+    runtime, backend = _create_runtime()
+    runtime.timed_boost_active = True
+    hass = SimpleNamespace(data={DOMAIN: {"entry": runtime}})
+    entry = DummyEntry(entry_id="entry")
+    entities: list[ButtonEntity] = []
+
+    await async_setup_entry(hass, entry, entities.extend)
+
+    cancel_button = next(
+        entity for entity in entities if entity.unique_id.endswith("boost_cancel")
+    )
+
+    runtime.controller = None
 
     with pytest.raises(HomeAssistantError):
         await cancel_button.async_press()

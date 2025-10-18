@@ -18,6 +18,7 @@ from . import (
     SecuremtrController,
     SecuremtrRuntimeData,
     async_dispatch_runtime_update,
+    async_run_with_reconnect,
     runtime_update_signal,
 )
 from .entity import build_device_info, slugify_identifier
@@ -52,8 +53,8 @@ async def async_setup_entry(
 
     async_add_entities(
         [
-            SecuremtrPowerSwitch(runtime, controller, entry.entry_id),
-            SecuremtrTimedBoostSwitch(runtime, controller, entry.entry_id),
+            SecuremtrPowerSwitch(runtime, controller, entry),
+            SecuremtrTimedBoostSwitch(runtime, controller, entry),
         ]
     )
 
@@ -67,13 +68,14 @@ class _SecuremtrBaseSwitch(SwitchEntity):
         self,
         runtime: SecuremtrRuntimeData,
         controller: SecuremtrController,
-        entry_id: str,
+        entry: ConfigEntry,
     ) -> None:
         """Initialise the switch with runtime context and controller metadata."""
 
         self._runtime = runtime
         self._controller = controller
-        self._entry_id = entry_id
+        self._entry = entry
+        self._entry_id = entry.entry_id
 
     @property
     def available(self) -> bool:
@@ -146,26 +148,30 @@ class SecuremtrPowerSwitch(_SecuremtrBaseSwitch):
 
         runtime = self._runtime
         controller = runtime.controller
-        session = runtime.session
-        websocket = runtime.websocket
 
-        if controller is None or session is None or websocket is None:
+        if controller is None:
             raise HomeAssistantError("Secure Meters controller is not connected")
 
+        entry = self._entry
         async with runtime.command_lock:
             try:
-                if turn_on:
-                    await runtime.backend.turn_controller_on(
-                        session,
-                        websocket,
-                        controller.gateway_id,
-                    )
-                else:
-                    await runtime.backend.turn_controller_off(
-                        session,
-                        websocket,
-                        controller.gateway_id,
-                    )
+                await async_run_with_reconnect(
+                    entry,
+                    runtime,
+                    (
+                        lambda backend, session, websocket: backend.turn_controller_on(
+                            session,
+                            websocket,
+                            controller.gateway_id,
+                        )
+                        if turn_on
+                        else backend.turn_controller_off(
+                            session,
+                            websocket,
+                            controller.gateway_id,
+                        )
+                    ),
+                )
             except BeanbagError as error:
                 _LOGGER.error("Failed to toggle Secure Meters controller: %s", error)
                 raise HomeAssistantError(
@@ -218,19 +224,22 @@ class SecuremtrTimedBoostSwitch(_SecuremtrBaseSwitch):
 
         runtime = self._runtime
         controller = runtime.controller
-        session = runtime.session
-        websocket = runtime.websocket
 
-        if controller is None or session is None or websocket is None:
+        if controller is None:
             raise HomeAssistantError("Secure Meters controller is not connected")
 
+        entry = self._entry
         async with runtime.command_lock:
             try:
-                await runtime.backend.set_timed_boost_enabled(
-                    session,
-                    websocket,
-                    controller.gateway_id,
-                    enabled=enabled,
+                await async_run_with_reconnect(
+                    entry,
+                    runtime,
+                    lambda backend, session, websocket: backend.set_timed_boost_enabled(
+                        session,
+                        websocket,
+                        controller.gateway_id,
+                        enabled=enabled,
+                    ),
                 )
             except BeanbagError as error:
                 _LOGGER.error(

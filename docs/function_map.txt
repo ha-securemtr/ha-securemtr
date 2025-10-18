@@ -78,6 +78,8 @@ custom_components.securemtr.button._SecuremtrBaseButton: Provide shared behaviou
 custom_components.securemtr.button.SecuremtrTimedBoostButton.async_press: Send the timed boost start command for the configured duration.
 custom_components.securemtr.button.SecuremtrCancelBoostButton.available: Only expose the button while a timed boost is active.
 custom_components.securemtr.button.SecuremtrCancelBoostButton.async_press: Send the timed boost stop command.
+custom_components.securemtr._async_reset_connection: Close the active Beanbag WebSocket and clear it from the runtime.
+custom_components.securemtr.async_run_with_reconnect: Execute a backend operation, retrying once after reconnecting.
 custom_components.securemtr.button.SecuremtrConsumptionMetricsButton: Trigger a manual refresh of Secure Meters consumption metrics.
 custom_components.securemtr.button.SecuremtrConsumptionMetricsButton.async_press: Trigger an on-demand refresh of consumption metrics.
 custom_components.securemtr.button.SecuremtrLogWeeklyScheduleButton: Read and log the configured weekly schedules.

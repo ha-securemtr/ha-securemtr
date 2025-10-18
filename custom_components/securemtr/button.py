@@ -7,6 +7,7 @@ from collections.abc import Iterable
 from datetime import timedelta
 import logging
 
+from aiohttp import ClientWebSocketResponse
 from homeassistant.components.button import ButtonEntity
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
@@ -21,11 +22,12 @@ from . import (
     SecuremtrController,
     SecuremtrRuntimeData,
     async_dispatch_runtime_update,
+    async_run_with_reconnect,
     coerce_end_time,
     consumption_metrics,
     runtime_update_signal,
 )
-from .beanbag import BeanbagError, WeeklyProgram
+from .beanbag import BeanbagBackend, BeanbagError, BeanbagSession, WeeklyProgram
 from .entity import build_device_info, slugify_identifier
 
 _LOGGER = logging.getLogger(__name__)
@@ -176,25 +178,36 @@ class SecuremtrLogWeeklyScheduleButton(_SecuremtrBaseButton):
 
         runtime = self._runtime
         controller = runtime.controller
-        session = runtime.session
-        websocket = runtime.websocket
 
-        if controller is None or session is None or websocket is None:
+        if controller is None:
             raise HomeAssistantError("Secure Meters controller is not connected")
 
+        entry = self._entry
         async with runtime.command_lock:
             try:
-                primary_program = await runtime.backend.read_weekly_program(
-                    session,
-                    websocket,
-                    controller.gateway_id,
-                    zone="primary",
-                )
-                boost_program = await runtime.backend.read_weekly_program(
-                    session,
-                    websocket,
-                    controller.gateway_id,
-                    zone="boost",
+                async def _read_programs(
+                    backend: BeanbagBackend,
+                    session: BeanbagSession,
+                    websocket: ClientWebSocketResponse,
+                ) -> tuple[WeeklyProgram, WeeklyProgram]:
+                    primary = await backend.read_weekly_program(
+                        session,
+                        websocket,
+                        controller.gateway_id,
+                        zone="primary",
+                    )
+                    boost = await backend.read_weekly_program(
+                        session,
+                        websocket,
+                        controller.gateway_id,
+                        zone="boost",
+                    )
+                    return primary, boost
+
+                primary_program, boost_program = await async_run_with_reconnect(
+                    entry,
+                    runtime,
+                    _read_programs,
                 )
             except BeanbagError as error:
                 _LOGGER.error("Failed to read Secure Meters weekly schedule: %s", error)
@@ -278,19 +291,22 @@ class SecuremtrTimedBoostButton(_SecuremtrBaseButton):
 
         runtime = self._runtime
         controller = runtime.controller
-        session = runtime.session
-        websocket = runtime.websocket
 
-        if controller is None or session is None or websocket is None:
+        if controller is None:
             raise HomeAssistantError("Secure Meters controller is not connected")
 
+        entry = self._entry
         async with runtime.command_lock:
             try:
-                await runtime.backend.start_timed_boost(
-                    session,
-                    websocket,
-                    controller.gateway_id,
-                    duration_minutes=self._duration,
+                await async_run_with_reconnect(
+                    entry,
+                    runtime,
+                    lambda backend, session, websocket: backend.start_timed_boost(
+                        session,
+                        websocket,
+                        controller.gateway_id,
+                        duration_minutes=self._duration,
+                    ),
                 )
             except (BeanbagError, ValueError) as error:
                 _LOGGER.error("Failed to start Secure Meters timed boost: %s", error)
@@ -339,19 +355,24 @@ class SecuremtrCancelBoostButton(_SecuremtrBaseButton):
 
         runtime = self._runtime
         controller = runtime.controller
-        session = runtime.session
-        websocket = runtime.websocket
 
-        if controller is None or session is None or websocket is None:
+        if controller is None:
             raise HomeAssistantError("Secure Meters controller is not connected")
 
         if runtime.timed_boost_active is not True:
             raise HomeAssistantError("Timed boost is not currently active")
 
+        entry = self._entry
         async with runtime.command_lock:
             try:
-                await runtime.backend.stop_timed_boost(
-                    session, websocket, controller.gateway_id
+                await async_run_with_reconnect(
+                    entry,
+                    runtime,
+                    lambda backend, session, websocket: backend.stop_timed_boost(
+                        session,
+                        websocket,
+                        controller.gateway_id,
+                    ),
                 )
             except BeanbagError as error:
                 _LOGGER.error("Failed to cancel Secure Meters timed boost: %s", error)
