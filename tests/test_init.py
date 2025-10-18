@@ -1356,6 +1356,73 @@ async def test_consumption_metrics_honours_start_anchor_strategy(
     assert boost_stats[0]["start"] == safe_anchor_datetime(first_day, time(17, 0), tz)
 
 
+@pytest.mark.asyncio
+async def test_consumption_metrics_falls_back_on_invalid_entity_statistic_id(
+    monkeypatch: pytest.MonkeyPatch,
+    track_time_spy,
+    capture_statistics,
+    store_instances,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Ensure invalid entity statistic IDs are ignored during import."""
+
+    hass = FakeHass()
+    track_time_spy(hass)
+    entry = DummyConfigEntry(
+        entry_id="metrics-invalid-stat",
+        unique_id="user@example.com",
+        data={"email": "user@example.com", "password": "digest"},
+        title="SecureMTR",
+    )
+
+    fake_session = object()
+    backend = FakeBeanbagBackend(fake_session)
+
+    class InvalidRegistry:
+        def async_get_entity_id(
+            self, domain: str, platform: str, unique_id: str
+        ) -> str | None:
+            if unique_id == "serial_1_primary_energy_total":
+                return "sensor.invalid-id"
+            if unique_id == "serial_1_boost_energy_total":
+                return "sensor.serial_1_boost_energy_total"
+            return None
+
+    monkeypatch.setattr(
+        "custom_components.securemtr.async_get_clientsession",
+        lambda hass_obj: fake_session,
+    )
+    monkeypatch.setattr(
+        "custom_components.securemtr.BeanbagBackend", lambda session: backend
+    )
+    monkeypatch.setattr(
+        "homeassistant.helpers.entity_registry.async_get",
+        lambda hass_obj: InvalidRegistry(),
+    )
+
+    caplog.set_level(logging.WARNING)
+
+    assert await async_setup_entry(hass, entry)
+    await hass.async_block_till_done()
+
+    await consumption_metrics(hass, entry)
+
+    entry_slug = slugify_identifier(entry.title or entry.entry_id)
+    fallback_id = f"{DOMAIN}:{entry_slug}:primary_energy_kwh"
+
+    assert fallback_id in capture_statistics
+    assert "sensor.invalid-id" not in capture_statistics
+    assert "sensor.serial_1_boost_energy_total" in capture_statistics
+
+    fallback_metadata, _ = capture_statistics[fallback_id]
+    assert fallback_metadata["statistic_id"] == fallback_id
+
+    assert any(
+        "Ignoring invalid statistic_id override sensor.invalid-id" in record.message
+        for record in caplog.records
+    )
+
+
 def test_load_statistics_options_prefers_hass_timezone() -> None:
     """Ensure statistics options honour the Home Assistant timezone."""
 

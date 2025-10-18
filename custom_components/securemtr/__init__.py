@@ -25,7 +25,7 @@ from homeassistant.const import (
     UnitOfEnergy,
     UnitOfTime,
 )
-from homeassistant.core import HomeAssistant
+from homeassistant.core import HomeAssistant, valid_entity_id
 from homeassistant.helpers import entity_registry as er
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
 from homeassistant.helpers.dispatcher import async_dispatcher_send
@@ -1159,7 +1159,18 @@ def _build_statistic_metadata(
     """Create metadata for a statistic export."""
 
     identifier = entry_identifier.strip() or entry_identifier
-    statistic_id = statistic_id_override or f"{DOMAIN}:{entry_slug}:{suffix}"
+    fallback_statistic_id = f"{DOMAIN}:{entry_slug}:{suffix}"
+    if statistic_id_override and valid_entity_id(statistic_id_override):
+        statistic_id = statistic_id_override
+    else:
+        statistic_id = fallback_statistic_id
+        if statistic_id_override:
+            _LOGGER.warning(
+                "Ignoring invalid statistic_id override %s for %s; using %s instead",
+                statistic_id_override,
+                suffix,
+                statistic_id,
+            )
     return {
         "source": DOMAIN,
         "name": f"{identifier} {definition.name}",
