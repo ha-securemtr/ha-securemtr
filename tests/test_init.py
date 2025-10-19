@@ -1119,10 +1119,10 @@ async def test_consumption_metrics_refreshes_history(
     stat_ids = {
         "sensor:serial_1_primary_energy_total",
         "sensor:serial_1_boost_energy_total",
-        f"sensor:{DOMAIN}_{entry_slug}_primary_runtime_h",
-        f"sensor:{DOMAIN}_{entry_slug}_primary_sched_h",
-        f"sensor:{DOMAIN}_{entry_slug}_boost_runtime_h",
-        f"sensor:{DOMAIN}_{entry_slug}_boost_sched_h",
+        f"{DOMAIN}:{DOMAIN}_{entry_slug}_primary_runtime_h",
+        f"{DOMAIN}:{DOMAIN}_{entry_slug}_primary_sched_h",
+        f"{DOMAIN}:{DOMAIN}_{entry_slug}_boost_runtime_h",
+        f"{DOMAIN}:{DOMAIN}_{entry_slug}_boost_sched_h",
     }
     assert set(capture_statistics) == stat_ids
 
@@ -1178,16 +1178,16 @@ async def test_consumption_metrics_refreshes_history(
             assert entry["max"] == pytest.approx(values[index])
 
     _assert_duration(
-        f"sensor:{DOMAIN}_{entry_slug}_primary_runtime_h", primary_runtime, time(3, 0)
+        f"{DOMAIN}:{DOMAIN}_{entry_slug}_primary_runtime_h", primary_runtime, time(3, 0)
     )
     _assert_duration(
-        f"sensor:{DOMAIN}_{entry_slug}_primary_sched_h", primary_scheduled, time(3, 0)
+        f"{DOMAIN}:{DOMAIN}_{entry_slug}_primary_sched_h", primary_scheduled, time(3, 0)
     )
     _assert_duration(
-        f"sensor:{DOMAIN}_{entry_slug}_boost_runtime_h", boost_runtime, time(17, 30)
+        f"{DOMAIN}:{DOMAIN}_{entry_slug}_boost_runtime_h", boost_runtime, time(17, 30)
     )
     _assert_duration(
-        f"sensor:{DOMAIN}_{entry_slug}_boost_sched_h", boost_scheduled, time(17, 30)
+        f"{DOMAIN}:{DOMAIN}_{entry_slug}_boost_sched_h", boost_scheduled, time(17, 30)
     )
 
     assert store_instances and store_instances[0].saved
@@ -1460,7 +1460,7 @@ async def test_consumption_metrics_falls_back_on_invalid_entity_statistic_id(
     await consumption_metrics(hass, entry)
 
     entry_slug = slugify_identifier(entry.title or entry.entry_id)
-    fallback_id = f"sensor:{DOMAIN}_{entry_slug}_primary_energy_kwh"
+    fallback_id = f"{DOMAIN}:{DOMAIN}_{entry_slug}_primary_energy_kwh"
 
     assert fallback_id in capture_statistics
     assert "sensor.invalid-id" not in capture_statistics
@@ -1468,6 +1468,7 @@ async def test_consumption_metrics_falls_back_on_invalid_entity_statistic_id(
 
     fallback_metadata, _ = capture_statistics[fallback_id]
     assert fallback_metadata["statistic_id"] == fallback_id
+    assert fallback_metadata["source"] == DOMAIN
 
     assert any(
         "does not map to a valid statistic_id" in record.message
@@ -1523,7 +1524,7 @@ async def test_consumption_metrics_falls_back_on_conflicting_statistic_source(
     await consumption_metrics(hass, entry)
 
     entry_slug = slugify_identifier(entry.title or entry.entry_id)
-    fallback_id = f"sensor:{DOMAIN}_{entry_slug}_primary_energy_kwh"
+    fallback_id = f"{DOMAIN}:{DOMAIN}_{entry_slug}_primary_energy_kwh"
 
     assert fallback_id in capture_statistics
     assert "sensor:serial_1_boost_energy_total" in capture_statistics
@@ -1532,6 +1533,9 @@ async def test_consumption_metrics_falls_back_on_conflicting_statistic_source(
     assert any(
         "conflicts with existing source" in record.message for record in caplog.records
     )
+
+    fallback_metadata, _ = capture_statistics[fallback_id]
+    assert fallback_metadata["source"] == DOMAIN
 
 
 @pytest.mark.asyncio
@@ -1582,12 +1586,15 @@ async def test_consumption_metrics_retries_when_recorder_rejects_override(
     await consumption_metrics(hass, entry)
 
     entry_slug = slugify_identifier(entry.title or entry.entry_id)
-    fallback_id = f"sensor:{DOMAIN}_{entry_slug}_primary_energy_kwh"
+    fallback_id = f"{DOMAIN}:{DOMAIN}_{entry_slug}_primary_energy_kwh"
 
     assert attempts[0] == "sensor:serial_1_primary_energy_total"
     assert fallback_id in attempts
     assert fallback_id in capture_statistics
     assert "sensor:serial_1_primary_energy_total" not in capture_statistics
+
+    fallback_metadata, _ = capture_statistics[fallback_id]
+    assert fallback_metadata["source"] == DOMAIN
 
 
 @pytest.mark.asyncio
@@ -1649,7 +1656,7 @@ async def test_build_statistic_metadata_generates_unique_fallback(
     entry_identifier = "SecureMTR"
     entry_slug = "securemtr"
     suffix = "primary_energy_kwh"
-    fallback_id = f"sensor:{DOMAIN}_{entry_slug}_{suffix}"
+    fallback_id = f"{DOMAIN}:{DOMAIN}_{entry_slug}_{suffix}"
 
     fake_statistics_metadata[fallback_id] = {
         "source": "utility_meter",
@@ -1669,9 +1676,10 @@ async def test_build_statistic_metadata_generates_unique_fallback(
         statistic_id_override=None,
     )
 
-    assert metadata["statistic_id"].startswith(f"sensor:{DOMAIN}_{entry_slug}_{suffix}")
+    assert metadata["statistic_id"].startswith(f"{DOMAIN}:{DOMAIN}_{entry_slug}_{suffix}")
     assert metadata["statistic_id"] != fallback_id
     assert metadata["statistic_id"].endswith("_2")
+    assert metadata["source"] == DOMAIN
 
 
 @pytest.mark.asyncio
@@ -1687,7 +1695,7 @@ async def test_build_statistic_metadata_accepts_existing_override(
     override_id = "sensor:securemtr_custom_primary"
 
     fake_statistics_metadata[override_id] = {
-        "source": DOMAIN,
+        "source": "sensor",
         "name": "SecureMTR Primary energy",
         "statistic_id": override_id,
         "unit_of_measurement": UnitOfEnergy.KILO_WATT_HOUR,
@@ -1705,6 +1713,7 @@ async def test_build_statistic_metadata_accepts_existing_override(
     )
 
     assert metadata["statistic_id"] == override_id
+    assert metadata["source"] == "sensor"
 
 
 @pytest.mark.asyncio
@@ -1729,7 +1738,8 @@ async def test_build_statistic_metadata_warns_on_invalid_override(
         )
 
     assert "Ignoring invalid statistic_id override" in caplog.text
-    assert metadata["statistic_id"].startswith(f"sensor:{DOMAIN}_")
+    assert metadata["statistic_id"].startswith(f"{DOMAIN}:{DOMAIN}_")
+    assert metadata["source"] == DOMAIN
 
 
 @pytest.mark.asyncio
@@ -1742,7 +1752,7 @@ async def test_build_statistic_metadata_reuses_securemtr_fallback(
     entry_identifier = "SecureMTR"
     entry_slug = "securemtr"
     suffix = "primary_energy_kwh"
-    fallback_id = f"sensor:{DOMAIN}_{entry_slug}_{suffix}"
+    fallback_id = f"{DOMAIN}:{DOMAIN}_{entry_slug}_{suffix}"
 
     fake_statistics_metadata[fallback_id] = {
         "source": DOMAIN,
@@ -1763,6 +1773,7 @@ async def test_build_statistic_metadata_reuses_securemtr_fallback(
     )
 
     assert metadata["statistic_id"] == fallback_id
+    assert metadata["source"] == DOMAIN
 
 
 @pytest.mark.asyncio
@@ -1777,7 +1788,7 @@ async def test_build_statistic_metadata_logs_invalid_generated_fallback(
     entry_identifier = "SecureMTR"
     entry_slug = "securemtr"
     suffix = "primary_energy_kwh"
-    fallback_id = f"sensor:{DOMAIN}_{entry_slug}_{suffix}"
+    fallback_id = f"{DOMAIN}:{DOMAIN}_{entry_slug}_{suffix}"
 
     fake_statistics_metadata[fallback_id] = {
         "source": "utility_meter",
@@ -1809,6 +1820,7 @@ async def test_build_statistic_metadata_logs_invalid_generated_fallback(
 
     assert metadata["statistic_id"].endswith("_2")
     assert "Generated fallback statistic_id" in caplog.text
+    assert metadata["source"] == DOMAIN
 
 def test_load_statistics_options_prefers_hass_timezone() -> None:
     """Ensure statistics options honour the Home Assistant timezone."""

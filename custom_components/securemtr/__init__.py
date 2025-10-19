@@ -19,6 +19,7 @@ from homeassistant.components.recorder.statistics import (
     StatisticMetaData,
     async_add_external_statistics,
     get_metadata,
+    split_statistic_id,
     valid_statistic_id,
 )
 from homeassistant.config_entries import ConfigEntry
@@ -1249,18 +1250,21 @@ async def _build_statistic_metadata(
     identifier = entry_identifier.strip() or entry_identifier
     fallback_object_id_base = f"{DOMAIN}_{entry_slug}_{suffix}"
     fallback_object_id = fallback_object_id_base
-    fallback_statistic_id = f"sensor:{fallback_object_id}"
+    fallback_statistic_id = f"{DOMAIN}:{fallback_object_id}"
     valid_override = False
     existing_source: str | None = None
     fallback_source: str | None = None
     selected_statistic_id = fallback_statistic_id
+    selected_source = DOMAIN
 
     if statistic_id_override and valid_statistic_id(statistic_id_override):
+        override_domain, _object_id = split_statistic_id(statistic_id_override)
         existing = await _async_fetch_statistic_metadata(hass, statistic_id_override)
         if existing:
             existing_source = existing.get("source")
-            if existing_source == DOMAIN:
+            if existing_source == override_domain:
                 selected_statistic_id = statistic_id_override
+                selected_source = override_domain
                 valid_override = True
             else:
                 _LOGGER.warning(
@@ -1272,6 +1276,7 @@ async def _build_statistic_metadata(
                 )
         else:
             selected_statistic_id = statistic_id_override
+            selected_source = override_domain
             valid_override = True
     elif statistic_id_override:
         _LOGGER.warning(
@@ -1284,19 +1289,22 @@ async def _build_statistic_metadata(
     if not valid_override:
         attempt = 1
         statistic_id = fallback_statistic_id
+        statistic_domain = DOMAIN
         while True:
             existing_fallback = await _async_fetch_statistic_metadata(hass, statistic_id)
             if not existing_fallback:
                 selected_statistic_id = statistic_id
+                selected_source = statistic_domain
                 break
             fallback_source = existing_fallback.get("source")
-            if fallback_source == DOMAIN:
+            if fallback_source == statistic_domain:
                 selected_statistic_id = statistic_id
+                selected_source = statistic_domain
                 break
 
             attempt += 1
             fallback_object_id = f"{fallback_object_id_base}_{attempt}"
-            statistic_id = f"sensor:{fallback_object_id}"
+            statistic_id = f"{DOMAIN}:{fallback_object_id}"
             _LOGGER.warning(
                 "Fallback statistic_id %s for %s conflicts with existing source %s; trying %s",
                 fallback_statistic_id,
@@ -1313,19 +1321,21 @@ async def _build_statistic_metadata(
                 fallback_statistic_id,
             )
             selected_statistic_id = fallback_statistic_id
+            selected_source = DOMAIN
 
     _LOGGER.debug(
-        "Statistic metadata resolved for %s: override=%s valid_override=%s existing_source=%s selected=%s fallback=%s fallback_source=%s",
+        "Statistic metadata resolved for %s: override=%s valid_override=%s existing_source=%s selected=%s selected_source=%s fallback=%s fallback_source=%s",
         suffix,
         statistic_id_override,
         valid_override,
         existing_source,
         selected_statistic_id,
+        selected_source,
         fallback_statistic_id,
         fallback_source,
     )
     return {
-        "source": DOMAIN,
+        "source": selected_source,
         "name": f"{identifier} {definition.name}",
         "statistic_id": selected_statistic_id,
         "unit_of_measurement": definition.unit,
