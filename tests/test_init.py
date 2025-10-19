@@ -7,7 +7,8 @@ import logging
 from dataclasses import dataclass, field
 from datetime import datetime, time, timezone
 from itertools import accumulate
-from typing import Any, Awaitable
+from functools import partial
+from typing import Any, Awaitable, Callable
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
@@ -524,6 +525,14 @@ class FakeHass:
 
     def verify_event_loop_thread(self, _caller: str) -> None:
         """Stub verification hook for dispatcher calls."""
+
+    async def async_add_executor_job(
+        self, func: Callable[..., Any], *args: Any, **kwargs: Any
+    ) -> Any:
+        """Run a synchronous callable in the executor."""
+
+        loop = asyncio.get_running_loop()
+        return await loop.run_in_executor(None, partial(func, *args, **kwargs))
 
 
 @pytest.fixture

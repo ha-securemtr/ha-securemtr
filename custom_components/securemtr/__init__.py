@@ -7,6 +7,7 @@ from collections.abc import Awaitable, Callable, Iterable
 from contextlib import suppress
 from dataclasses import dataclass, field
 from datetime import date, datetime, time, timedelta, tzinfo
+from functools import partial
 import logging
 from typing import Any, TypeVar
 
@@ -948,7 +949,7 @@ async def consumption_metrics(hass: HomeAssistant, entry: ConfigEntry) -> None:
                 len(processed_rows),
             )
             continue
-        metadata = _build_statistic_metadata(
+        metadata = await _build_statistic_metadata(
             hass,
             entry_identifier,
             entry_slug,
@@ -1179,7 +1180,7 @@ def _resolve_anchor(
     return fallback
 
 
-def _build_statistic_metadata(
+async def _build_statistic_metadata(
     hass: HomeAssistant,
     entry_identifier: str,
     entry_slug: str,
@@ -1188,7 +1189,7 @@ def _build_statistic_metadata(
     *,
     statistic_id_override: str | None = None,
 ) -> StatisticMetaData:
-    """Create metadata for a statistic export."""
+    """Create metadata for a statistic export with recorder-aware overrides."""
 
     identifier = entry_identifier.strip() or entry_identifier
     fallback_object_id = f"{DOMAIN}_{entry_slug}_{suffix}"
@@ -1196,7 +1197,13 @@ def _build_statistic_metadata(
     valid_override = False
     existing_source: str | None = None
     if statistic_id_override and valid_statistic_id(statistic_id_override):
-        existing = get_metadata(hass, statistic_ids={statistic_id_override})
+        existing = await hass.async_add_executor_job(
+            partial(
+                get_metadata,
+                hass,
+                statistic_ids={statistic_id_override},
+            )
+        )
         if existing:
             _, metadata = next(iter(existing.values()))
             existing_source = metadata.get("source")
