@@ -223,6 +223,9 @@ class SecuremtrEnergyTotalSensor(_SecuremtrBaseSensor):
         series_start = zone_state.get("series_start")
         if isinstance(series_start, str):
             attributes["series_start_day"] = series_start
+        offset = zone_state.get("offset_kwh")
+        if isinstance(offset, (int, float)):
+            attributes["offset_kwh"] = float(offset)
         return attributes or None
 
 

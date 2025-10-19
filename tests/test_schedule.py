@@ -88,7 +88,7 @@ def test_canonicalize_weekly_merges_wraparound_duplicates() -> None:
 def test_day_intervals_returns_local_datetimes() -> None:
     """day_intervals should yield aware datetimes for the requested day."""
 
-    tz = ZoneInfo("Europe/Dublin")
+    tz = ZoneInfo("Europe/London")
     program = _program_with_intervals()
     canonical = canonicalize_weekly(program)
 
@@ -151,7 +151,7 @@ def test_day_intervals_returns_local_datetimes() -> None:
 def test_choose_anchor_supports_strategies() -> None:
     """choose_anchor should return anchors using the requested strategy."""
 
-    tz = ZoneInfo("Europe/Dublin")
+    tz = ZoneInfo("Europe/London")
     program = _program_with_intervals()
     monday_intervals = day_intervals(
         program,

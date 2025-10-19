@@ -10,7 +10,7 @@ from datetime import date, datetime, time, timezone
 from itertools import accumulate
 from typing import Any, Awaitable, Callable, cast
 from types import ModuleType, SimpleNamespace
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, call
 
 import pytest
 
@@ -83,6 +83,7 @@ from homeassistant.util import dt as dt_util
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 from homeassistant.components.sensor import SensorDeviceClass, SensorStateClass
 from homeassistant.const import UnitOfEnergy
+from homeassistant.helpers.entity_registry import RegistryEntryDisabler
 
 
 @dataclass(slots=True)
@@ -462,6 +463,47 @@ class FakeConfigEntries:
         return list(entries)
 
 
+@dataclass(slots=True)
+class FakeRegistryEntry:
+    """Represent the subset of entity registry data required for tests."""
+
+    entity_id: str
+    unique_id: str
+    config_entry_id: str
+    disabled_by: RegistryEntryDisabler | None = None
+    platform: str = "sensor"
+
+
+class FakeEntityRegistry:
+    """Provide a minimal entity registry stub with update tracking."""
+
+    def __init__(self, entries: list[FakeRegistryEntry]) -> None:
+        self._entries_by_id: dict[str, FakeRegistryEntry] = {
+            entry.entity_id: entry for entry in entries
+        }
+        self._entities_data = dict(self._entries_by_id)
+        self.entities = SimpleNamespace(get_entry=self._entries_by_id.get)
+        self.updated: list[tuple[str, dict[str, object]]] = []
+
+    def async_get(self, entity_id: str) -> FakeRegistryEntry | None:
+        """Return an entity entry if present."""
+
+        return self._entries_by_id.get(entity_id)
+
+    def async_update_entity(self, entity_id: str, **changes: object) -> None:
+        """Apply updates to a stored entity entry."""
+
+        entry = self._entries_by_id[entity_id]
+        for key, value in changes.items():
+            setattr(entry, key, value)
+        self.updated.append((entity_id, dict(changes)))
+
+    def entry(self, entity_id: str) -> FakeRegistryEntry:
+        """Return the stored entry, raising if it is missing."""
+
+        return self._entries_by_id[entity_id]
+
+
 class FakeServiceRegistry:
     """Provide a minimal async service registry for FakeHass."""
 
@@ -630,11 +672,26 @@ async def test_async_setup_entry_starts_backend(
         ("switch",),
         ("button", "binary_sensor", "sensor"),
     ]
-    assert callbacks and callbacks[0][1:] == (1, 0, 0)
+    assert callbacks
+    assert [callback_info[1:] for callback_info in callbacks] == [
+        (1, 0, 0),
+        (13, 0, 0),
+    ]
+    assert fake_metrics.await_args_list == [call(hass, entry)]
+
     callback = callbacks[0][0]
     callback(datetime.now(timezone.utc))
     await hass.async_block_till_done()
-    fake_metrics.assert_called_once_with(hass, entry)
+    assert fake_metrics.await_args_list == [call(hass, entry), call(hass, entry)]
+
+    midday_callback = callbacks[1][0]
+    midday_callback(datetime.now(timezone.utc))
+    await hass.async_block_till_done()
+    assert fake_metrics.await_args_list == [
+        call(hass, entry),
+        call(hass, entry),
+        call(hass, entry),
+    ]
 
     meters = hass.config_entries.async_entries(UTILITY_METER_DOMAIN)
     assert len(meters) == 4
@@ -661,6 +718,235 @@ async def test_async_setup_entry_starts_backend(
         assert meter.options[CONF_METER_DELTA_VALUES] is False
         assert meter.options[CONF_METER_PERIODICALLY_RESETTING] is True
         assert meter.options[CONF_SENSOR_ALWAYS_AVAILABLE] is False
+
+
+@pytest.mark.asyncio
+async def test_consumption_scheduler_fires_with_frozen_clock(
+    monkeypatch: pytest.MonkeyPatch,
+    track_time_spy,
+    store_instances,
+) -> None:
+    """Ensure the twice-daily scheduler and immediate refresh run deterministically."""
+
+    hass = FakeHass()
+    callbacks = track_time_spy(hass)
+    entry = DummyConfigEntry(
+        entry_id="scheduler",
+        data={"email": "user@example.com", "password": "digest"},
+        unique_id="user@example.com",
+    )
+
+    fake_metrics = AsyncMock()
+    monkeypatch.setattr(
+        "custom_components.securemtr.consumption_metrics", fake_metrics
+    )
+    monkeypatch.setattr(
+        "custom_components.securemtr.async_get_clientsession",
+        lambda hass_obj: object(),
+    )
+    monkeypatch.setattr(
+        "custom_components.securemtr.BeanbagBackend",
+        lambda session: SimpleNamespace(),
+    )
+    start_backend = AsyncMock()
+    monkeypatch.setattr(
+        "custom_components.securemtr._async_start_backend", start_backend
+    )
+    monkeypatch.setattr(
+        "custom_components.securemtr._async_ensure_utility_meters",
+        AsyncMock(),
+    )
+    monkeypatch.setattr(
+        "custom_components.securemtr._async_retire_legacy_entities",
+        AsyncMock(),
+    )
+
+    assert await async_setup_entry(hass, entry)
+    await hass.async_block_till_done()
+
+    assert fake_metrics.await_args_list == [call(hass, entry)]
+    assert start_backend.await_count == 1
+    assert len(callbacks) == 2
+    assert [callback_info[1:] for callback_info in callbacks] == [
+        (1, 0, 0),
+        (13, 0, 0),
+    ]
+
+    morning = datetime(2024, 8, 20, 1, 0, tzinfo=timezone.utc)
+    callbacks[0][0](morning)
+    await hass.async_block_till_done()
+
+    midday = datetime(2024, 8, 20, 13, 0, tzinfo=timezone.utc)
+    callbacks[1][0](midday)
+    await hass.async_block_till_done()
+
+    assert fake_metrics.await_args_list == [
+        call(hass, entry),
+        call(hass, entry),
+        call(hass, entry),
+    ]
+
+    runtime = hass.data[DOMAIN][entry.entry_id]
+    assert runtime.consumption_schedule_unsub is not None
+    runtime.consumption_schedule_unsub()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("scenario", "callback_index"),
+    (
+        ("spring_morning", 0),
+        ("autumn_first_morning", 0),
+        ("autumn_second_morning", 0),
+        ("spring_midday", 1),
+        ("autumn_midday", 1),
+    ),
+)
+async def test_consumption_scheduler_handles_dst_transitions(
+    monkeypatch: pytest.MonkeyPatch,
+    track_time_spy,
+    store_instances,
+    scenario: str,
+    callback_index: int,
+) -> None:
+    """Ensure the scheduler fires at local hours around DST boundaries."""
+
+    hass = FakeHass()
+    hass.config.time_zone = "Europe/London"
+    london = ZoneInfo("Europe/London")
+    monkeypatch.setattr(dt_util, "DEFAULT_TIME_ZONE", london, raising=False)
+    callbacks = track_time_spy(hass)
+    entry = DummyConfigEntry(
+        entry_id=f"scheduler_dst_{scenario}",
+        data={"email": "user@example.com", "password": "digest"},
+        unique_id="user@example.com",
+    )
+
+    fake_metrics = AsyncMock()
+    monkeypatch.setattr(
+        "custom_components.securemtr.consumption_metrics", fake_metrics
+    )
+    monkeypatch.setattr(
+        "custom_components.securemtr.async_get_clientsession",
+        lambda hass_obj: object(),
+    )
+    monkeypatch.setattr(
+        "custom_components.securemtr.BeanbagBackend",
+        lambda session: SimpleNamespace(),
+    )
+    start_backend = AsyncMock()
+    monkeypatch.setattr(
+        "custom_components.securemtr._async_start_backend", start_backend
+    )
+    monkeypatch.setattr(
+        "custom_components.securemtr._async_ensure_utility_meters",
+        AsyncMock(),
+    )
+    monkeypatch.setattr(
+        "custom_components.securemtr._async_retire_legacy_entities",
+        AsyncMock(),
+    )
+
+    assert await async_setup_entry(hass, entry)
+    await hass.async_block_till_done()
+
+    assert len(callbacks) == 2
+    callback = callbacks[callback_index]
+    expected_hour = 1 if callback_index == 0 else 13
+    assert callback[1:] == (expected_hour, 0, 0)
+
+    assert fake_metrics.await_args_list == [call(hass, entry)]
+
+    if scenario == "spring_morning":
+        event = datetime(2024, 3, 31, 1, 0, tzinfo=london)
+    elif scenario == "autumn_first_morning":
+        event = datetime(2024, 10, 27, 1, 0, tzinfo=london, fold=0)
+    elif scenario == "autumn_second_morning":
+        event = datetime(2024, 10, 27, 1, 0, tzinfo=london, fold=1)
+    elif scenario == "spring_midday":
+        event = datetime(2024, 3, 31, 13, 0, tzinfo=london)
+    else:
+        event = datetime(2024, 10, 27, 13, 0, tzinfo=london)
+
+    callback[0](event)
+    await hass.async_block_till_done()
+
+    assert fake_metrics.await_args_list == [call(hass, entry), call(hass, entry)]
+
+    runtime = hass.data[DOMAIN][entry.entry_id]
+    assert runtime.consumption_schedule_unsub is not None
+    runtime.consumption_schedule_unsub()
+
+@pytest.mark.asyncio
+async def test_async_setup_entry_disables_legacy_energy_entities(
+    monkeypatch: pytest.MonkeyPatch,
+    track_time_spy,
+    store_instances,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Ensure legacy totals are disabled and guidance is logged during setup."""
+
+    caplog.set_level(logging.INFO)
+    hass = FakeHass()
+    track_time_spy(hass)
+    entry = DummyConfigEntry(
+        entry_id="legacy", data={"email": "user@example.com", "password": "digest"}
+    )
+
+    registry = FakeEntityRegistry(
+        [
+            FakeRegistryEntry(
+                entity_id="sensor.primary_energy_total",
+                unique_id="serial_1_primary_energy_total",
+                config_entry_id=entry.entry_id,
+            ),
+            FakeRegistryEntry(
+                entity_id="sensor.securemtr_primary_energy_kwh",
+                unique_id="serial_1_primary_energy_total",
+                config_entry_id=entry.entry_id,
+            ),
+            FakeRegistryEntry(
+                entity_id="sensor.other_primary_energy_total",
+                unique_id="serial_2_primary_energy_total",
+                config_entry_id="other-entry",
+            ),
+        ]
+    )
+
+    monkeypatch.setattr(
+        "custom_components.securemtr.er.async_get", lambda hass_obj: registry
+    )
+    monkeypatch.setattr(
+        "custom_components.securemtr._async_start_backend",
+        lambda entry_obj, runtime: asyncio.sleep(0),
+    )
+    fake_metrics = AsyncMock()
+    monkeypatch.setattr(
+        "custom_components.securemtr.consumption_metrics", fake_metrics
+    )
+    monkeypatch.setattr(
+        "custom_components.securemtr.async_get_clientsession", lambda hass_obj: object()
+    )
+    monkeypatch.setattr(
+        "custom_components.securemtr.BeanbagBackend", lambda session: SimpleNamespace()
+    )
+    monkeypatch.setattr(
+        "custom_components.securemtr._async_ensure_utility_meters",
+        AsyncMock(),
+    )
+
+    assert await async_setup_entry(hass, entry)
+    await hass.async_block_till_done()
+
+    legacy_entry = registry.entry("sensor.primary_energy_total")
+    assert legacy_entry.disabled_by is RegistryEntryDisabler.INTEGRATION
+    assert (
+        registry.entry("sensor.securemtr_primary_energy_kwh").disabled_by is None
+    )
+    assert any(
+        "Disabled legacy SecureMTR energy entity sensor.primary_energy_total" in message
+        for message in caplog.messages
+    )
 
 
 @pytest.mark.asyncio
@@ -1086,14 +1372,24 @@ async def test_consumption_metrics_refreshes_history(
     runtime = hass.data[DOMAIN][entry.entry_id]
     runtime.websocket.closed = True
     initial_logins = len(backend.login_calls)
+    initial_history_count = len(backend.energy_history_calls)
+    initial_program_calls = len(backend.program_calls)
+    initial_dispatch_count = len(dispatch_calls)
 
     await consumption_metrics(hass, entry)
 
     assert len(backend.login_calls) == initial_logins + 1
-    assert backend.energy_history_calls == [("gateway-1", 1)]
-    assert backend.program_calls == [("primary", "gateway-1"), ("boost", "gateway-1")]
+    assert backend.energy_history_calls[initial_history_count:] == [
+        ("gateway-1", 1)
+    ]
+    assert backend.program_calls[initial_program_calls:] == [
+        ("primary", "gateway-1"),
+        ("boost", "gateway-1"),
+    ]
+    assert len(dispatch_calls) == initial_dispatch_count + 1
+    assert dispatch_calls[-1] == (hass, entry.entry_id)
 
-    tz = ZoneInfo("Europe/Dublin")
+    tz = ZoneInfo("Europe/London")
     base_timestamp = 1_700_000_000
     offsets = range(1, 8)
     expected_log = []
@@ -1182,7 +1478,6 @@ async def test_consumption_metrics_refreshes_history(
     assert boost_recent["scheduled_hours"] == pytest.approx(boost_scheduled[-1])
     assert boost_recent["energy_sum"] == pytest.approx(boost_cumulative[-1])
 
-    assert dispatch_calls == [(hass, entry.entry_id)]
 
 @pytest.mark.asyncio
 async def test_consumption_metrics_skips_processed_days(
@@ -1218,15 +1513,25 @@ async def test_consumption_metrics_skips_processed_days(
 
     runtime = hass.data[DOMAIN][entry.entry_id]
     runtime.websocket.closed = True
+    runtime.energy_accumulator = None
+    runtime.energy_state = None
+    backend.energy_history_calls.clear()
+    store_instances[0].data = None
+    store_instances[0].saved.clear()
+    initial_history_count = len(backend.energy_history_calls)
+    initial_save_count = len(store_instances[0].saved)
 
     await consumption_metrics(hass, entry)
+    first_history_count = len(backend.energy_history_calls)
+    assert first_history_count == initial_history_count + 1
+    assert len(store_instances[0].saved) > initial_save_count
     first_save_count = len(store_instances[0].saved)
     persisted = store_instances[0].saved[-1]
 
     await consumption_metrics(hass, entry)
 
     assert len(store_instances[0].saved) == first_save_count
-    assert len(backend.energy_history_calls) == 2
+    assert len(backend.energy_history_calls) == first_history_count + 1
     energy_state = runtime.energy_state
     assert energy_state is not None
     assert energy_state["primary"]["energy_sum"] == pytest.approx(
@@ -1292,8 +1597,11 @@ async def test_consumption_metrics_processes_only_new_days(
 
     runtime = hass.data[DOMAIN][entry.entry_id]
     runtime.websocket.closed = True
+    runtime.energy_accumulator = None
+    backend.energy_history_calls.clear()
+    caplog.clear()
 
-    tz = ZoneInfo("Europe/Dublin")
+    tz = ZoneInfo("Europe/London")
     base_timestamp = 1_700_000_000
     initial_days = [
         assign_report_day(
@@ -1377,7 +1685,7 @@ async def test_energy_dashboard_flow_validates_sensor_states(
     entry.hass = hass
 
     fake_session = object()
-    tz = ZoneInfo("Europe/Dublin")
+    tz = ZoneInfo("Europe/London")
     base_timestamp = int(datetime(2024, 3, 1, 12, tzinfo=timezone.utc).timestamp())
     fallback_power_kw = 2.85
 
@@ -1472,10 +1780,51 @@ async def test_energy_dashboard_flow_validates_sensor_states(
         datetime.fromtimestamp(all_samples[0].timestamp, timezone.utc), tz
     ).isoformat()
 
-    for index, batch in enumerate(batches, start=1):
+    runtime = hass.data[DOMAIN][entry.entry_id]
+    energy_state = runtime.energy_state
+    assert isinstance(energy_state, dict)
+
+    initial_batch = batches[0]
+    initial_last_sample = initial_batch[-1]
+    initial_last_day_iso = assign_report_day(
+        datetime.fromtimestamp(initial_last_sample.timestamp, timezone.utc), tz
+    ).isoformat()
+    initial_primary = sum(
+        (sample.primary_active_minutes / 60) * fallback_power_kw
+        for sample in initial_batch
+    )
+    initial_boost = sum(
+        (sample.boost_active_minutes / 60) * fallback_power_kw
+        for sample in initial_batch
+    )
+
+    primary_state = energy_state["primary"]
+    boost_state = energy_state["boost"]
+    assert primary_state["energy_sum"] == pytest.approx(initial_primary)
+    assert boost_state["energy_sum"] == pytest.approx(initial_boost)
+    assert primary_state["last_day"] == initial_last_day_iso
+    assert boost_state["last_day"] == initial_last_day_iso
+    assert primary_state["series_start"] == first_day_iso
+    assert boost_state["series_start"] == first_day_iso
+    assert primary_sensor.native_value == pytest.approx(initial_primary)
+    assert boost_sensor.native_value == pytest.approx(initial_boost)
+    assert primary_sensor.extra_state_attributes == {
+        "last_report_day": initial_last_day_iso,
+        "series_start_day": first_day_iso,
+        "offset_kwh": 0.0,
+    }
+    assert boost_sensor.extra_state_attributes == {
+        "last_report_day": initial_last_day_iso,
+        "series_start_day": first_day_iso,
+        "offset_kwh": 0.0,
+    }
+
+    initial_dispatch_count = len(dispatch_calls)
+    initial_history_count = len(backend.energy_history_calls)
+
+    for step, batch in enumerate(batches[1:], start=1):
         await consumption_metrics(hass, entry)
 
-        runtime = hass.data[DOMAIN][entry.entry_id]
         energy_state = runtime.energy_state
         assert isinstance(energy_state, dict)
 
@@ -1511,10 +1860,12 @@ async def test_energy_dashboard_flow_validates_sensor_states(
         assert primary_attrs == {
             "last_report_day": last_day_iso,
             "series_start_day": first_day_iso,
+            "offset_kwh": 0.0,
         }
         assert boost_attrs == {
             "last_report_day": last_day_iso,
             "series_start_day": first_day_iso,
+            "offset_kwh": 0.0,
         }
 
         persisted = store_instances[0].saved[-1]
@@ -1536,8 +1887,8 @@ async def test_energy_dashboard_flow_validates_sensor_states(
 
         expected_signal = runtime_update_signal(entry.entry_id)
         assert dispatch_calls[-1] == (hass, expected_signal)
-        assert len(dispatch_calls) == index
-        assert len(backend.energy_history_calls) == index
+        assert len(dispatch_calls) == initial_dispatch_count + step
+        assert len(backend.energy_history_calls) == initial_history_count + step
 
     assert backend.energy_history_calls == [
         ("gateway-1", 1),

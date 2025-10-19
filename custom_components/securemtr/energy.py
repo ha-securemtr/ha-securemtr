@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from datetime import date
+from datetime import date, timedelta
 import hashlib
 import logging
 from typing import Any, TypedDict
@@ -13,8 +13,10 @@ from homeassistant.helpers.storage import Store
 _LOGGER = logging.getLogger(__name__)
 
 _ZONE_KEYS = ("primary", "boost")
-_TOLERANCE = 1e-6
+_TOLERANCE = 1e-3
 _DIGEST_PRECISION = "{:.6f}"  # Match recorder rounding to improve idempotency.
+_FREEZE_TOLERANCE = 0.02
+_FREEZE_HORIZON = timedelta(days=1)
 
 
 class LedgerEntry(TypedDict, total=False):
@@ -30,6 +32,8 @@ def _default_zone_state() -> dict[str, Any]:
     return {
         "ledger": {},
         "cumulative_kwh": 0.0,
+        "raw_cumulative_kwh": 0.0,
+        "monotonic_offset": 0.0,
         "last_processed_day": None,
         "series_start": None,
     }
@@ -95,9 +99,27 @@ def _normalise_zone_payload(payload: dict[str, Any]) -> dict[str, Any]:
     try:
         cumulative = float(cumulative_raw)
     except (TypeError, ValueError):
-        cumulative = sum(entry.get("energy", 0.0) for entry in ledger.values())
+        cumulative = 0.0
     if cumulative < 0:
         cumulative = 0.0
+
+    raw_total = sum(entry.get("energy", 0.0) for entry in ledger.values())
+    offset_raw = payload.get("monotonic_offset")
+    try:
+        offset = float(offset_raw)
+    except (TypeError, ValueError):
+        offset = 0.0
+    if offset < 0:
+        offset = 0.0
+
+    if cumulative + _TOLERANCE < raw_total:
+        cumulative = raw_total
+        offset = 0.0
+    elif cumulative > raw_total + _TOLERANCE:
+        offset = cumulative - raw_total
+    else:
+        cumulative = raw_total
+        offset = 0.0
 
     last_processed = payload.get("last_processed_day") or payload.get("last_day")
     if not isinstance(last_processed, str) or last_processed not in ledger:
@@ -110,6 +132,8 @@ def _normalise_zone_payload(payload: dict[str, Any]) -> dict[str, Any]:
     return {
         "ledger": ledger,
         "cumulative_kwh": cumulative,
+        "raw_cumulative_kwh": raw_total,
+        "monotonic_offset": offset,
         "last_processed_day": last_processed,
         "series_start": series_start,
     }
@@ -145,7 +169,7 @@ class EnergyAccumulator:
         self._loaded = True
 
     async def async_add_day(self, zone: str, report_day: date, energy_kwh: float) -> bool:
-        """Incorporate a daily energy total for the requested zone."""
+        """Incorporate a daily energy total and maintain monotonic exposure."""
 
         if zone not in _ZONE_KEYS:
             raise ValueError(f"Unsupported energy zone: {zone}")
@@ -157,35 +181,70 @@ class EnergyAccumulator:
         zone_state = self._state[zone]
         ledger: dict[str, LedgerEntry] = zone_state.setdefault("ledger", {})
         existing = ledger.get(day_key)
-        if existing is not None and abs(existing.get("energy", 0.0) - normalized) <= _TOLERANCE:
-            return False
+        digest = _entry_digest(normalized)
+
+        existing_energy = None
+        if existing is not None:
+            try:
+                existing_energy = float(existing.get("energy", 0.0))
+            except (TypeError, ValueError):
+                existing_energy = 0.0
+
+            if existing.get("digest") == digest:
+                return False
+
+            if abs(existing_energy - normalized) <= _TOLERANCE:
+                return False
+
+            freeze_cutoff = _today() - _FREEZE_HORIZON
+            if report_day < freeze_cutoff:
+                delta = abs(existing_energy - normalized)
+                if delta <= _FREEZE_TOLERANCE:
+                    _LOGGER.debug(
+                        "SecureMTR %s energy freeze active for %s; ignoring %.3f kWh delta",
+                        zone,
+                        day_key,
+                        delta,
+                    )
+                    return False
 
         ledger[day_key] = {
             "energy": normalized,
-            "digest": _entry_digest(normalized),
+            "digest": digest,
         }
         ordered_days = sorted(ledger)
-        cumulative = 0.0
+        raw_total = 0.0
         for key in ordered_days:
-            cumulative += ledger[key].get("energy", 0.0)
+            raw_total += ledger[key].get("energy", 0.0)
 
-        previous_total = float(zone_state.get("cumulative_kwh", 0.0))
-        if cumulative + _TOLERANCE < previous_total:
-            _LOGGER.warning(
-                "SecureMTR %s energy decreased from %.3f to %.3f; resetting series",
+        try:
+            previous_total = float(zone_state.get("cumulative_kwh", 0.0))
+        except (TypeError, ValueError):
+            previous_total = 0.0
+
+        try:
+            offset = float(zone_state.get("monotonic_offset", 0.0))
+        except (TypeError, ValueError):
+            offset = 0.0
+        if offset < 0:
+            offset = 0.0
+
+        if raw_total + _TOLERANCE >= previous_total:
+            cumulative = raw_total
+            offset = 0.0
+        else:
+            cumulative = previous_total
+            offset = max(cumulative - raw_total, 0.0)
+            _LOGGER.info(
+                "SecureMTR %s energy revision detected; maintaining %.3f kWh using %.3f kWh offset",
                 zone,
-                previous_total,
                 cumulative,
+                offset,
             )
-            ledger.clear()
-            ledger[day_key] = {
-                "energy": normalized,
-                "digest": _entry_digest(normalized),
-            }
-            ordered_days = [day_key]
-            cumulative = normalized
 
         zone_state["cumulative_kwh"] = cumulative
+        zone_state["raw_cumulative_kwh"] = raw_total
+        zone_state["monotonic_offset"] = offset
         zone_state["last_processed_day"] = ordered_days[-1]
         zone_state["series_start"] = ordered_days[0]
 
@@ -197,16 +256,28 @@ class EnergyAccumulator:
 
         if not self._loaded:
             return {
-                zone: {"energy_sum": 0.0, "last_day": None, "series_start": None}
+                zone: {
+                    "energy_sum": 0.0,
+                    "last_day": None,
+                    "series_start": None,
+                    "offset_kwh": 0.0,
+                }
                 for zone in _ZONE_KEYS
             }
 
         state: dict[str, dict[str, Any]] = {}
         for zone, payload in self._state.items():
+            try:
+                offset = float(payload.get("monotonic_offset", 0.0))
+            except (TypeError, ValueError):
+                offset = 0.0
+            if offset < 0:
+                offset = 0.0
             state[zone] = {
                 "energy_sum": float(payload.get("cumulative_kwh", 0.0)),
                 "last_day": payload.get("last_processed_day"),
                 "series_start": payload.get("series_start"),
+                "offset_kwh": offset,
             }
         return state
 
@@ -238,4 +309,9 @@ class EnergyAccumulator:
             return float(zone_state.get("cumulative_kwh", 0.0))
         except (TypeError, ValueError):
             return 0.0
+
+def _today() -> date:
+    """Return today's date for freeze horizon calculations."""
+
+    return date.today()
 

@@ -59,7 +59,7 @@ class _ForwardTZ(tzinfo):
 def test_to_local_converts_epoch_and_datetime(value: int | datetime) -> None:
     """to_local should return an aware datetime in the provided timezone."""
 
-    tz = ZoneInfo("Europe/Dublin")
+    tz = ZoneInfo("Europe/London")
     result = to_local(value, tz)
     assert result.tzinfo == tz
     assert result.year == 2024
@@ -70,26 +70,34 @@ def test_to_local_converts_epoch_and_datetime(value: int | datetime) -> None:
 def test_assign_report_day_returns_previous_local_day() -> None:
     """assign_report_day should map timestamps to the previous local day."""
 
-    tz = ZoneInfo("Europe/Dublin")
+    tz = ZoneInfo("Europe/London")
     sample = datetime(2024, 4, 2, 0, 15, tzinfo=timezone.utc)
     assert assign_report_day(sample, tz) == date(2024, 4, 1)
 
 
-def test_assign_report_day_handles_dst_transition() -> None:
+@pytest.mark.parametrize(
+    ("timestamp", "expected"),
+    (
+        (datetime(2024, 3, 31, 0, 30, tzinfo=timezone.utc), date(2024, 3, 30)),
+        (datetime(2024, 3, 31, 23, 30, tzinfo=timezone.utc), date(2024, 3, 31)),
+        (datetime(2024, 10, 27, 0, 30, tzinfo=timezone.utc), date(2024, 10, 26)),
+        (datetime(2024, 10, 27, 23, 30, tzinfo=timezone.utc), date(2024, 10, 26)),
+    ),
+)
+def test_assign_report_day_handles_dst_transition(
+    timestamp: datetime, expected: date
+) -> None:
     """assign_report_day should honour DST offsets around transitions."""
 
-    tz = ZoneInfo("Europe/Dublin")
-    before = datetime(2024, 3, 31, 0, 30, tzinfo=timezone.utc)
-    after = datetime(2024, 3, 31, 23, 30, tzinfo=timezone.utc)
+    tz = ZoneInfo("Europe/London")
 
-    assert assign_report_day(before, tz) == date(2024, 3, 30)
-    assert assign_report_day(after, tz) == date(2024, 3, 31)
+    assert assign_report_day(timestamp, tz) == expected
 
 
 def test_assign_report_day_rejects_naive_datetimes() -> None:
     """assign_report_day should raise when provided a naive datetime."""
 
-    tz = ZoneInfo("Europe/Dublin")
+    tz = ZoneInfo("Europe/London")
     with pytest.raises(ValueError):
         assign_report_day(datetime(2024, 4, 2, 0, 15), tz)
 
@@ -97,7 +105,7 @@ def test_assign_report_day_rejects_naive_datetimes() -> None:
 def test_safe_anchor_datetime_handles_dst_gap() -> None:
     """safe_anchor_datetime should clamp anchors within the same day across DST."""
 
-    tz = ZoneInfo("Europe/Dublin")
+    tz = ZoneInfo("Europe/London")
     anchor = safe_anchor_datetime(date(2024, 3, 31), time(1, 30), tz)
     assert anchor.date() == date(2024, 3, 31)
     assert anchor.hour == 2
@@ -107,7 +115,7 @@ def test_safe_anchor_datetime_handles_dst_gap() -> None:
 def test_safe_anchor_datetime_handles_dst_overlap() -> None:
     """safe_anchor_datetime should prefer the later occurrence during overlaps."""
 
-    tz = ZoneInfo("Europe/Dublin")
+    tz = ZoneInfo("Europe/London")
     anchor = safe_anchor_datetime(date(2023, 10, 29), time(1, 30), tz)
     assert anchor.date() == date(2023, 10, 29)
     assert anchor.fold == 1
@@ -116,7 +124,7 @@ def test_safe_anchor_datetime_handles_dst_overlap() -> None:
 def test_safe_anchor_datetime_preserves_fold_with_seconds() -> None:
     """safe_anchor_datetime should retain the late fold when seconds are present."""
 
-    tz = ZoneInfo("Europe/Dublin")
+    tz = ZoneInfo("Europe/London")
     anchor = safe_anchor_datetime(date(2023, 10, 29), time(1, 30, 45), tz)
     assert anchor.fold == 1
     assert anchor.second == 45

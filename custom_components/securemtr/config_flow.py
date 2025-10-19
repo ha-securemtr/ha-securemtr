@@ -23,7 +23,7 @@ CONF_ANCHOR_STRATEGY = "anchor_strategy"
 CONF_ELEMENT_POWER_KW = "element_power_kw"
 CONF_PREFER_DEVICE_ENERGY = "prefer_device_energy"
 
-DEFAULT_TIMEZONE = "Europe/Dublin"
+DEFAULT_TIMEZONE = "Europe/London"
 DEFAULT_PRIMARY_ANCHOR = "03:00"
 DEFAULT_BOOST_ANCHOR = "17:00"
 DEFAULT_ANCHOR_STRATEGY = "midpoint"

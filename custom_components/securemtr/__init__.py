@@ -32,6 +32,7 @@ from homeassistant.const import CONF_EMAIL, CONF_NAME, CONF_PASSWORD, CONF_TIME_
 from homeassistant.core import HomeAssistant, ServiceCall
 from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers import config_validation as cv
+from homeassistant.helpers import entity_registry as er
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
 from homeassistant.helpers.dispatcher import async_dispatcher_send
 from homeassistant.helpers.event import async_track_time_change
@@ -80,6 +81,14 @@ ATTR_ENTRY_ID = "entry_id"
 ATTR_ZONE = "zone"
 ENERGY_ZONES = ("primary", "boost")
 _RESET_SERVICE_FLAG = "_reset_service_registered"
+
+
+LEGACY_ENERGY_ENTITY_GUIDANCE: MappingProxyType[str, tuple[str, str]] = MappingProxyType(
+    {
+        "sensor.primary_energy_total": ("primary", "sensor.securemtr_primary_energy_kwh"),
+        "sensor.boost_energy_total": ("boost", "sensor.securemtr_boost_energy_kwh"),
+    }
+)
 
 
 _ResultT = TypeVar("_ResultT")
@@ -137,6 +146,72 @@ def _async_register_services(hass: HomeAssistant) -> None:
         schema=schema,
     )
     domain_data[_RESET_SERVICE_FLAG] = True
+
+
+def _disable_legacy_energy_entities(
+    entity_registry: er.EntityRegistry, entry: ConfigEntry
+) -> list[tuple[str, str]]:
+    """Disable legacy total sensors for the config entry if present."""
+
+    disabled_entities: list[tuple[str, str]] = []
+    for legacy_entity_id, guidance in LEGACY_ENERGY_ENTITY_GUIDANCE.items():
+        entry_record = None
+        entities_data = getattr(entity_registry, "_entities_data", None)
+        if isinstance(entities_data, dict):
+            entry_record = entities_data.get(legacy_entity_id)
+        if entry_record is None:
+            entities_index = getattr(entity_registry, "entities", None)
+            if entities_index is not None:
+                with suppress(Exception):
+                    entry_record = entities_index.get_entry(legacy_entity_id)
+        if entry_record is None:
+            continue
+        if entry_record.config_entry_id != entry.entry_id:
+            continue
+        zone, replacement_entity_id = guidance
+        expected_suffix = f"_{zone}_energy_total"
+        unique_id = getattr(entry_record, "unique_id", "") or ""
+        if expected_suffix and not unique_id.endswith(expected_suffix):
+            continue
+        if entry_record.disabled_by == er.RegistryEntryDisabler.INTEGRATION:
+            continue
+        entity_registry.async_update_entity(
+            legacy_entity_id,
+            disabled_by=er.RegistryEntryDisabler.INTEGRATION,
+        )
+        disabled_entities.append((legacy_entity_id, replacement_entity_id))
+    return disabled_entities
+
+
+async def _async_retire_legacy_entities(
+    hass: HomeAssistant, entry: ConfigEntry
+) -> None:
+    """Hide legacy entities so users choose the new cumulative sensors."""
+
+    entry_identifier = _entry_display_name(entry)
+    try:
+        entity_registry = er.async_get(hass)
+    except Exception:  # pragma: no cover - defensive guard
+        _LOGGER.exception(
+            "Unable to inspect entity registry for legacy SecureMTR entities: %s",
+            entry_identifier,
+        )
+        return
+
+    disabled_entities = _disable_legacy_energy_entities(entity_registry, entry)
+    if not disabled_entities:
+        return
+
+    for legacy_entity_id, replacement_entity_id in disabled_entities:
+        _LOGGER.info(
+            (
+                "Disabled legacy SecureMTR energy entity %s for %s; "
+                "select %s in the Energy Dashboard instead"
+            ),
+            legacy_entity_id,
+            entry_identifier,
+            replacement_entity_id,
+        )
 
 
 async def _async_ensure_utility_meters(
@@ -342,6 +417,8 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         _energy_store_key(entry),
     )
 
+    await _async_retire_legacy_entities(hass, entry)
+
     runtime.startup_task = hass.async_create_task(_async_start_backend(entry, runtime))
 
     def _scheduled_consumption_refresh(now: datetime) -> None:
@@ -352,13 +429,32 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         )
         hass.async_create_task(consumption_metrics(hass, entry))
 
-    runtime.consumption_schedule_unsub = async_track_time_change(
-        hass,
-        _scheduled_consumption_refresh,
-        hour=1,
-        minute=0,
-        second=0,
+    schedule_unsubs: list[Callable[[], None]] = []
+    for scheduled_hour in (1, 13):
+        schedule_unsubs.append(
+            async_track_time_change(
+                hass,
+                _scheduled_consumption_refresh,
+                hour=scheduled_hour,
+                minute=0,
+                second=0,
+            )
+        )
+
+    def _unsubscribe_schedules() -> None:
+        """Cancel every scheduled consumption metrics callback."""
+
+        for unsubscribe in schedule_unsubs:
+            with suppress(Exception):
+                unsubscribe()
+        schedule_unsubs.clear()
+
+    runtime.consumption_schedule_unsub = _unsubscribe_schedules
+
+    _LOGGER.debug(
+        "Queuing immediate consumption metrics refresh for %s", entry_identifier
     )
+    hass.async_create_task(consumption_metrics(hass, entry))
 
     config_entries_helper = getattr(hass, "config_entries", None)
     if config_entries_helper is not None:

@@ -250,7 +250,7 @@ async def test_options_flow_uses_default_values() -> None:
     """Ensure the options flow exposes documented defaults."""
 
     handler = SecuremtrConfigFlow.async_get_options_flow(SimpleNamespace(options={}))
-    handler.hass = SimpleNamespace(config=SimpleNamespace(time_zone="Europe/Dublin"))
+    handler.hass = SimpleNamespace(config=SimpleNamespace(time_zone="Europe/London"))
 
     result = await handler.async_step_init()
     assert result["type"] == FlowResultType.FORM
@@ -278,7 +278,7 @@ async def test_options_flow_prefers_stored_values() -> None:
             }
         )
     )
-    handler.hass = SimpleNamespace(config=SimpleNamespace(time_zone="Europe/Dublin"))
+    handler.hass = SimpleNamespace(config=SimpleNamespace(time_zone="Europe/London"))
 
     result = await handler.async_step_init()
     defaults = result["data_schema"]({})

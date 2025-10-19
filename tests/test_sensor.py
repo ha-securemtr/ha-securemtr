@@ -146,11 +146,13 @@ async def test_energy_sensors_report_totals() -> None:
             "energy_sum": 12.5,
             "last_day": "2024-03-01",
             "series_start": "2024-02-20",
+            "offset_kwh": 0.0,
         },
         "boost": {
             "energy_sum": 4.75,
             "last_day": "2024-03-01",
             "series_start": "2024-02-22",
+            "offset_kwh": 1.25,
         },
     }
     runtime.statistics_recent = {
@@ -191,7 +193,11 @@ async def test_energy_sensors_report_totals() -> None:
     assert primary_energy.extra_state_attributes == {
         "last_report_day": "2024-03-01",
         "series_start_day": "2024-02-20",
+        "offset_kwh": 0.0,
     }
+    device_info = primary_energy.device_info
+    assert device_info["identifiers"] == {(DOMAIN, "serial-1")}
+    assert device_info["manufacturer"] == "Secure Meters"
 
     boost_energy = sensors_by_id["serial_1_boost_energy_total"]
     assert isinstance(boost_energy, SecuremtrEnergyTotalSensor)
@@ -201,6 +207,7 @@ async def test_energy_sensors_report_totals() -> None:
     assert boost_energy.extra_state_attributes == {
         "last_report_day": "2024-03-01",
         "series_start_day": "2024-02-22",
+        "offset_kwh": 1.25,
     }
 
     primary_runtime = sensors_by_id["serial_1_primary_runtime_daily"]

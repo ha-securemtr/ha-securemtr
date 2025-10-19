@@ -1,5 +1,7 @@
 custom_components.securemtr.__init__.async_setup: Set up the securemtr integration.
 custom_components.securemtr.__init__._async_register_services: Register SecureMTR domain services once per Home Assistant instance.
+custom_components.securemtr.__init__._disable_legacy_energy_entities: Disable legacy energy total entities for a config entry and note the replacements.
+custom_components.securemtr.__init__._async_retire_legacy_entities: Inspect the entity registry for legacy totals and hide them while logging guidance.
 custom_components.securemtr.__init__._async_ensure_utility_meters: Create daily and weekly utility_meter helpers that wrap the SecureMTR energy sensors when missing.
 custom_components.securemtr.__init__.SecuremtrRuntimeData: Track runtime Beanbag backend state and cached sensor context for a config entry.
 custom_components.securemtr.__init__.SecuremtrController: Represent the discovered Secure Meters controller.
@@ -78,6 +80,9 @@ custom_components.securemtr.button.SecuremtrTimedBoostButton.async_press: Send t
 custom_components.securemtr.button.SecuremtrCancelBoostButton.available: Only expose the button while a timed boost is active.
 custom_components.securemtr.button.SecuremtrCancelBoostButton.async_press: Send the timed boost stop command.
 custom_components.securemtr._async_reset_connection: Close the active Beanbag WebSocket and clear it from the runtime.
+tests.test_external_statistics_guard._iter_securemtr_files: Yield Python source files within the securemtr integration package.
+tests.test_external_statistics_guard._scan_forbidden_references: Return forbidden reference summaries discovered within the file.
+tests.test_external_statistics_guard.test_integration_avoids_external_statistics_calls: Ensure the integration never references recorder external statistics helpers.
 custom_components.securemtr.async_run_with_reconnect: Execute a backend operation, retrying once after reconnecting.
 custom_components.securemtr.button.SecuremtrConsumptionMetricsButton: Trigger a manual refresh of Secure Meters consumption metrics.
 custom_components.securemtr.button.SecuremtrConsumptionMetricsButton.async_press: Trigger an on-demand refresh of consumption metrics.
@@ -111,7 +116,7 @@ custom_components.securemtr.schedule.day_intervals: Return schedule intervals fo
 custom_components.securemtr.schedule.choose_anchor: Choose an anchor datetime from intervals using the provided strategy.
 custom_components.securemtr.energy.EnergyAccumulator: Persist monotonic cumulative energy totals for SecureMTR zones.
 custom_components.securemtr.energy.EnergyAccumulator.async_load: Load persisted accumulator state if available.
-custom_components.securemtr.energy.EnergyAccumulator.async_add_day: Incorporate a daily energy total for the requested zone and persist when changed.
+custom_components.securemtr.energy.EnergyAccumulator.async_add_day: Incorporate a daily energy total and maintain monotonic exposure.
 custom_components.securemtr.energy.EnergyAccumulator.async_reset_zone: Clear the stored ledger and totals for the requested zone.
 custom_components.securemtr.energy.EnergyAccumulator.zone_total: Return the cumulative kilowatt-hour total for the provided zone.
 custom_components.securemtr.energy.EnergyAccumulator.as_sensor_state: Return the sensor-friendly view of the accumulator state.
@@ -119,3 +124,4 @@ custom_components.securemtr.energy._default_zone_state: Return the default persi
 custom_components.securemtr.energy._sanitize_day_map: Return a sanitized copy of the stored per-day energy ledger.
 custom_components.securemtr.energy._entry_digest: Return a deterministic digest for the provided energy sample.
 custom_components.securemtr.energy._normalise_zone_payload: Convert stored payloads into the canonical ledger representation.
+custom_components.securemtr.energy._today: Return today's date for freeze horizon calculations.
