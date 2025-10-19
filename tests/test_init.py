@@ -51,7 +51,10 @@ from custom_components.securemtr.config_flow import (
 )
 from custom_components.securemtr.entity import slugify_identifier
 from custom_components.securemtr.utils import report_day_for_sample, safe_anchor_datetime
-from homeassistant.components.recorder.statistics import StatisticMeanType
+from homeassistant.components.recorder.statistics import (
+    StatisticMeanType,
+    StatisticMetaData,
+)
 from homeassistant.const import UnitOfEnergy, UnitOfTime
 from homeassistant.util import dt as dt_util
 
@@ -130,6 +133,31 @@ def capture_statistics(monkeypatch: pytest.MonkeyPatch):
         _capture_statistics,
     )
     return captured
+
+
+@pytest.fixture(autouse=True)
+def fake_statistics_metadata(monkeypatch: pytest.MonkeyPatch) -> dict[str, StatisticMetaData]:
+    """Stub recorder metadata queries used for statistic overrides."""
+
+    metadata: dict[str, StatisticMetaData] = {}
+
+    def _get_metadata(
+        _hass, *, statistic_ids: set[str] | None = None, statistic_type=None, statistic_source=None
+    ) -> dict[str, tuple[int, StatisticMetaData]]:
+        if not statistic_ids:
+            return {}
+        result: dict[str, tuple[int, StatisticMetaData]] = {}
+        for index, statistic_id in enumerate(statistic_ids, start=1):
+            existing = metadata.get(statistic_id)
+            if existing is not None:
+                result[statistic_id] = (index, existing)
+        return result
+
+    monkeypatch.setattr(
+        "custom_components.securemtr.get_metadata",
+        _get_metadata,
+    )
+    return metadata
 
 
 @pytest.fixture(autouse=True)
@@ -1420,6 +1448,65 @@ async def test_consumption_metrics_falls_back_on_invalid_entity_statistic_id(
     assert any(
         "does not map to a valid statistic_id" in record.message
         for record in caplog.records
+    )
+
+
+@pytest.mark.asyncio
+async def test_consumption_metrics_falls_back_on_conflicting_statistic_source(
+    monkeypatch: pytest.MonkeyPatch,
+    track_time_spy,
+    capture_statistics,
+    fake_statistics_metadata,
+    store_instances,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Ensure overrides with conflicting recorder sources fall back to integration IDs."""
+
+    hass = FakeHass()
+    track_time_spy(hass)
+    entry = DummyConfigEntry(
+        entry_id="metrics-conflicting-source",
+        unique_id="user@example.com",
+        data={"email": "user@example.com", "password": "digest"},
+        title="SecureMTR",
+    )
+
+    fake_session = object()
+    backend = FakeBeanbagBackend(fake_session)
+
+    monkeypatch.setattr(
+        "custom_components.securemtr.async_get_clientsession",
+        lambda hass_obj: fake_session,
+    )
+    monkeypatch.setattr(
+        "custom_components.securemtr.BeanbagBackend", lambda session: backend
+    )
+
+    fake_statistics_metadata["sensor:serial_1_primary_energy_total"] = {
+        "source": "utility_meter",
+        "name": "Existing energy",
+        "statistic_id": "sensor:serial_1_primary_energy_total",
+        "unit_of_measurement": UnitOfEnergy.KILO_WATT_HOUR,
+        "has_sum": True,
+        "mean_type": StatisticMeanType.NONE,
+    }
+
+    caplog.set_level(logging.WARNING)
+
+    assert await async_setup_entry(hass, entry)
+    await hass.async_block_till_done()
+
+    await consumption_metrics(hass, entry)
+
+    entry_slug = slugify_identifier(entry.title or entry.entry_id)
+    fallback_id = f"sensor:{DOMAIN}_{entry_slug}_primary_energy_kwh"
+
+    assert fallback_id in capture_statistics
+    assert "sensor:serial_1_boost_energy_total" in capture_statistics
+    assert "sensor:serial_1_primary_energy_total" not in capture_statistics
+
+    assert any(
+        "conflicts with existing source" in record.message for record in caplog.records
     )
 
 

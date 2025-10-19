@@ -16,6 +16,7 @@ from homeassistant.components.recorder.statistics import (
     StatisticMeanType,
     StatisticMetaData,
     async_add_external_statistics,
+    get_metadata,
     valid_statistic_id,
 )
 from homeassistant.config_entries import ConfigEntry
@@ -948,6 +949,7 @@ async def consumption_metrics(hass: HomeAssistant, entry: ConfigEntry) -> None:
             )
             continue
         metadata = _build_statistic_metadata(
+            hass,
             entry_identifier,
             entry_slug,
             suffix,
@@ -1178,6 +1180,7 @@ def _resolve_anchor(
 
 
 def _build_statistic_metadata(
+    hass: HomeAssistant,
     entry_identifier: str,
     entry_slug: str,
     suffix: str,
@@ -1191,9 +1194,27 @@ def _build_statistic_metadata(
     fallback_object_id = f"{DOMAIN}_{entry_slug}_{suffix}"
     fallback_statistic_id = f"sensor:{fallback_object_id}"
     valid_override = False
+    existing_source: str | None = None
     if statistic_id_override and valid_statistic_id(statistic_id_override):
-        statistic_id = statistic_id_override
-        valid_override = True
+        existing = get_metadata(hass, statistic_ids={statistic_id_override})
+        if existing:
+            _, metadata = next(iter(existing.values()))
+            existing_source = metadata.get("source")
+            if existing_source == DOMAIN:
+                statistic_id = statistic_id_override
+                valid_override = True
+            else:
+                _LOGGER.warning(
+                    "Statistic override %s for %s conflicts with existing source %s; using %s",
+                    statistic_id_override,
+                    suffix,
+                    existing_source,
+                    fallback_statistic_id,
+                )
+                statistic_id = fallback_statistic_id
+        else:
+            statistic_id = statistic_id_override
+            valid_override = True
     else:
         statistic_id = fallback_statistic_id
         if statistic_id_override:
@@ -1204,10 +1225,11 @@ def _build_statistic_metadata(
                 statistic_id,
             )
     _LOGGER.debug(
-        "Statistic metadata resolved for %s: override=%s valid_override=%s selected=%s fallback=%s",
+        "Statistic metadata resolved for %s: override=%s valid_override=%s existing_source=%s selected=%s fallback=%s",
         suffix,
         statistic_id_override,
         valid_override,
+        existing_source,
         statistic_id,
         fallback_statistic_id,
     )
