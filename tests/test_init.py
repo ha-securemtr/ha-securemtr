@@ -1065,12 +1065,12 @@ async def test_consumption_metrics_refreshes_history(
 
     entry_slug = slugify_identifier(entry.title or entry.entry_id)
     stat_ids = {
-        "sensor.serial_1_primary_energy_total",
-        "sensor.serial_1_boost_energy_total",
-        f"sensor.{DOMAIN}_{entry_slug}_primary_runtime_h",
-        f"sensor.{DOMAIN}_{entry_slug}_primary_sched_h",
-        f"sensor.{DOMAIN}_{entry_slug}_boost_runtime_h",
-        f"sensor.{DOMAIN}_{entry_slug}_boost_sched_h",
+        "sensor:serial_1_primary_energy_total",
+        "sensor:serial_1_boost_energy_total",
+        f"sensor:{DOMAIN}_{entry_slug}_primary_runtime_h",
+        f"sensor:{DOMAIN}_{entry_slug}_primary_sched_h",
+        f"sensor:{DOMAIN}_{entry_slug}_boost_runtime_h",
+        f"sensor:{DOMAIN}_{entry_slug}_boost_sched_h",
     }
     assert set(capture_statistics) == stat_ids
 
@@ -1095,13 +1095,13 @@ async def test_consumption_metrics_refreshes_history(
             assert entry["sum"] == pytest.approx(cumulative[index])
 
     _assert_energy(
-        "sensor.serial_1_primary_energy_total",
+        "sensor:serial_1_primary_energy_total",
         primary_energy,
         primary_cumulative,
         time(3, 0),
     )
     _assert_energy(
-        "sensor.serial_1_boost_energy_total",
+        "sensor:serial_1_boost_energy_total",
         boost_energy,
         boost_cumulative,
         time(17, 30),
@@ -1126,16 +1126,16 @@ async def test_consumption_metrics_refreshes_history(
             assert entry["max"] == pytest.approx(values[index])
 
     _assert_duration(
-        f"sensor.{DOMAIN}_{entry_slug}_primary_runtime_h", primary_runtime, time(3, 0)
+        f"sensor:{DOMAIN}_{entry_slug}_primary_runtime_h", primary_runtime, time(3, 0)
     )
     _assert_duration(
-        f"sensor.{DOMAIN}_{entry_slug}_primary_sched_h", primary_scheduled, time(3, 0)
+        f"sensor:{DOMAIN}_{entry_slug}_primary_sched_h", primary_scheduled, time(3, 0)
     )
     _assert_duration(
-        f"sensor.{DOMAIN}_{entry_slug}_boost_runtime_h", boost_runtime, time(17, 30)
+        f"sensor:{DOMAIN}_{entry_slug}_boost_runtime_h", boost_runtime, time(17, 30)
     )
     _assert_duration(
-        f"sensor.{DOMAIN}_{entry_slug}_boost_sched_h", boost_scheduled, time(17, 30)
+        f"sensor:{DOMAIN}_{entry_slug}_boost_sched_h", boost_scheduled, time(17, 30)
     )
 
     assert store_instances and store_instances[0].saved
@@ -1263,8 +1263,8 @@ async def test_consumption_metrics_imports_only_new_days(
 
     await consumption_metrics(hass, entry)
 
-    primary_id = "sensor.serial_1_primary_energy_total"
-    boost_id = "sensor.serial_1_boost_energy_total"
+    primary_id = "sensor:serial_1_primary_energy_total"
+    boost_id = "sensor:serial_1_boost_energy_total"
 
     expected_days = [
         report_day_for_sample(base_timestamp + offset * 86_400, tz)
@@ -1339,8 +1339,8 @@ async def test_consumption_metrics_honours_start_anchor_strategy(
 
     await consumption_metrics(hass, entry)
 
-    primary_id = "sensor.serial_1_primary_energy_total"
-    boost_id = "sensor.serial_1_boost_energy_total"
+    primary_id = "sensor:serial_1_primary_energy_total"
+    boost_id = "sensor:serial_1_boost_energy_total"
 
     tz = dt_util.get_time_zone(DEFAULT_TIMEZONE)
     assert tz is not None
@@ -1408,17 +1408,17 @@ async def test_consumption_metrics_falls_back_on_invalid_entity_statistic_id(
     await consumption_metrics(hass, entry)
 
     entry_slug = slugify_identifier(entry.title or entry.entry_id)
-    fallback_id = f"sensor.{DOMAIN}_{entry_slug}_primary_energy_kwh"
+    fallback_id = f"sensor:{DOMAIN}_{entry_slug}_primary_energy_kwh"
 
     assert fallback_id in capture_statistics
     assert "sensor.invalid-id" not in capture_statistics
-    assert "sensor.serial_1_boost_energy_total" in capture_statistics
+    assert "sensor:serial_1_boost_energy_total" in capture_statistics
 
     fallback_metadata, _ = capture_statistics[fallback_id]
     assert fallback_metadata["statistic_id"] == fallback_id
 
     assert any(
-        "Ignoring invalid statistic_id override sensor.invalid-id" in record.message
+        "does not map to a valid statistic_id" in record.message
         for record in caplog.records
     )
 

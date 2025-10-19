@@ -16,6 +16,7 @@ from homeassistant.components.recorder.statistics import (
     StatisticMeanType,
     StatisticMetaData,
     async_add_external_statistics,
+    valid_statistic_id,
 )
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import (
@@ -25,7 +26,7 @@ from homeassistant.const import (
     UnitOfEnergy,
     UnitOfTime,
 )
-from homeassistant.core import HomeAssistant, valid_entity_id
+from homeassistant.core import HomeAssistant
 from homeassistant.helpers import entity_registry as er
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
 from homeassistant.helpers.dispatcher import async_dispatcher_send
@@ -756,14 +757,24 @@ async def consumption_metrics(hass: HomeAssistant, entry: ConfigEntry) -> None:
                 entry_identifier,
             )
             continue
+        statistic_id = entity_id.replace(".", ":", 1)
+        if not valid_statistic_id(statistic_id):
+            _LOGGER.warning(
+                "Entity %s resolved for %s %s zone does not map to a valid statistic_id",
+                entity_id,
+                entry_identifier,
+                zone_key,
+            )
+            continue
         _LOGGER.debug(
-            "Resolved statistic entity for %s %s zone: unique_id=%s entity_id=%s",
+            "Resolved statistic entity for %s %s zone: unique_id=%s entity_id=%s statistic_id=%s",
             entry_identifier,
             zone_key,
             unique_id,
             entity_id,
+            statistic_id,
         )
-        energy_statistic_ids[context.energy_suffix] = entity_id
+        energy_statistic_ids[context.energy_suffix] = statistic_id
 
     suffix_zone_key: dict[str, str] = {}
     for zone_key, context in contexts.items():
@@ -1178,9 +1189,9 @@ def _build_statistic_metadata(
 
     identifier = entry_identifier.strip() or entry_identifier
     fallback_object_id = f"{DOMAIN}_{entry_slug}_{suffix}"
-    fallback_statistic_id = f"sensor.{fallback_object_id}"
+    fallback_statistic_id = f"sensor:{fallback_object_id}"
     valid_override = False
-    if statistic_id_override and valid_entity_id(statistic_id_override):
+    if statistic_id_override and valid_statistic_id(statistic_id_override):
         statistic_id = statistic_id_override
         valid_override = True
     else:
