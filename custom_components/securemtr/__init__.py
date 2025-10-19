@@ -12,6 +12,7 @@ import logging
 from typing import Any, TypeVar
 
 from aiohttp import ClientWebSocketResponse
+from homeassistant.components import recorder
 from homeassistant.components.recorder.statistics import (
     StatisticData,
     StatisticMeanType,
@@ -29,6 +30,7 @@ from homeassistant.const import (
     UnitOfTime,
 )
 from homeassistant.core import HomeAssistant
+from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers import entity_registry as er
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
 from homeassistant.helpers.dispatcher import async_dispatcher_send
@@ -949,29 +951,63 @@ async def consumption_metrics(hass: HomeAssistant, entry: ConfigEntry) -> None:
                 len(processed_rows),
             )
             continue
-        metadata = await _build_statistic_metadata(
-            hass,
-            entry_identifier,
-            entry_slug,
-            suffix,
-            definition,
-            statistic_id_override=energy_statistic_ids.get(suffix),
-        )
-        _LOGGER.info(
-            "Importing %d statistic rows for %s", len(statistics), metadata["statistic_id"]
-        )
-        try:
-            async_add_external_statistics(hass, metadata, statistics)
-        except Exception:  # pragma: no cover - defensive logging for production visibility
-            sample = statistics[:1]
-            _LOGGER.exception(
-                "Failed importing %d statistic rows for %s with metadata=%s sample=%s",
+        override_candidates = []
+        override_value = energy_statistic_ids.get(suffix)
+        if override_value is not None:
+            override_candidates.append(override_value)
+        override_candidates.append(None)
+        attempted_overrides: set[str | None] = set()
+        for override in override_candidates:
+            if override in attempted_overrides:
+                continue
+            attempted_overrides.add(override)
+            metadata = await _build_statistic_metadata(
+                hass,
+                entry_identifier,
+                entry_slug,
+                suffix,
+                definition,
+                statistic_id_override=override,
+            )
+            _LOGGER.info(
+                "Importing %d statistic rows for %s",
                 len(statistics),
                 metadata["statistic_id"],
-                metadata,
-                sample,
             )
-            raise
+            try:
+                async_add_external_statistics(hass, metadata, statistics)
+                break
+            except HomeAssistantError as err:
+                if (
+                    override is not None
+                    and str(err) == "Invalid source"
+                    and metadata["statistic_id"] == override
+                ):
+                    _LOGGER.warning(
+                        "Recorder rejected statistic override %s for %s due to source mismatch; retrying fallback",
+                        metadata["statistic_id"],
+                        suffix,
+                    )
+                    continue
+                sample = statistics[:1]
+                _LOGGER.exception(
+                    "Failed importing %d statistic rows for %s with metadata=%s sample=%s",
+                    len(statistics),
+                    metadata["statistic_id"],
+                    metadata,
+                    sample,
+                )
+                raise
+            except Exception:  # pragma: no cover - defensive logging for production visibility
+                sample = statistics[:1]
+                _LOGGER.exception(
+                    "Failed importing %d statistic rows for %s with metadata=%s sample=%s",
+                    len(statistics),
+                    metadata["statistic_id"],
+                    metadata,
+                    sample,
+                )
+                raise
 
     runtime.statistics_recent = recent_measurements
 
@@ -1180,6 +1216,25 @@ def _resolve_anchor(
     return fallback
 
 
+async def _async_fetch_statistic_metadata(
+    hass: HomeAssistant, statistic_id: str
+) -> StatisticMetaData | None:
+    """Retrieve existing recorder metadata for a statistic ID."""
+
+    instance = recorder.get_instance(hass)
+    if instance is None:
+        return None
+
+    result = await instance.async_add_executor_job(
+        partial(get_metadata, hass, statistic_ids={statistic_id})
+    )
+    if not result:
+        return None
+
+    _, metadata = next(iter(result.values()))
+    return metadata
+
+
 async def _build_statistic_metadata(
     hass: HomeAssistant,
     entry_identifier: str,
@@ -1192,23 +1247,20 @@ async def _build_statistic_metadata(
     """Create metadata for a statistic export with recorder-aware overrides."""
 
     identifier = entry_identifier.strip() or entry_identifier
-    fallback_object_id = f"{DOMAIN}_{entry_slug}_{suffix}"
+    fallback_object_id_base = f"{DOMAIN}_{entry_slug}_{suffix}"
+    fallback_object_id = fallback_object_id_base
     fallback_statistic_id = f"sensor:{fallback_object_id}"
     valid_override = False
     existing_source: str | None = None
+    fallback_source: str | None = None
+    selected_statistic_id = fallback_statistic_id
+
     if statistic_id_override and valid_statistic_id(statistic_id_override):
-        existing = await hass.async_add_executor_job(
-            partial(
-                get_metadata,
-                hass,
-                statistic_ids={statistic_id_override},
-            )
-        )
+        existing = await _async_fetch_statistic_metadata(hass, statistic_id_override)
         if existing:
-            _, metadata = next(iter(existing.values()))
-            existing_source = metadata.get("source")
+            existing_source = existing.get("source")
             if existing_source == DOMAIN:
-                statistic_id = statistic_id_override
+                selected_statistic_id = statistic_id_override
                 valid_override = True
             else:
                 _LOGGER.warning(
@@ -1218,32 +1270,64 @@ async def _build_statistic_metadata(
                     existing_source,
                     fallback_statistic_id,
                 )
-                statistic_id = fallback_statistic_id
         else:
-            statistic_id = statistic_id_override
+            selected_statistic_id = statistic_id_override
             valid_override = True
-    else:
+    elif statistic_id_override:
+        _LOGGER.warning(
+            "Ignoring invalid statistic_id override %s for %s; using %s instead",
+            statistic_id_override,
+            suffix,
+            fallback_statistic_id,
+        )
+
+    if not valid_override:
+        attempt = 1
         statistic_id = fallback_statistic_id
-        if statistic_id_override:
+        while True:
+            existing_fallback = await _async_fetch_statistic_metadata(hass, statistic_id)
+            if not existing_fallback:
+                selected_statistic_id = statistic_id
+                break
+            fallback_source = existing_fallback.get("source")
+            if fallback_source == DOMAIN:
+                selected_statistic_id = statistic_id
+                break
+
+            attempt += 1
+            fallback_object_id = f"{fallback_object_id_base}_{attempt}"
+            statistic_id = f"sensor:{fallback_object_id}"
             _LOGGER.warning(
-                "Ignoring invalid statistic_id override %s for %s; using %s instead",
-                statistic_id_override,
+                "Fallback statistic_id %s for %s conflicts with existing source %s; trying %s",
+                fallback_statistic_id,
                 suffix,
+                fallback_source,
                 statistic_id,
             )
+            fallback_statistic_id = statistic_id
+        if not valid_statistic_id(selected_statistic_id):
+            _LOGGER.error(
+                "Generated fallback statistic_id %s for %s is invalid; using %s",
+                selected_statistic_id,
+                suffix,
+                fallback_statistic_id,
+            )
+            selected_statistic_id = fallback_statistic_id
+
     _LOGGER.debug(
-        "Statistic metadata resolved for %s: override=%s valid_override=%s existing_source=%s selected=%s fallback=%s",
+        "Statistic metadata resolved for %s: override=%s valid_override=%s existing_source=%s selected=%s fallback=%s fallback_source=%s",
         suffix,
         statistic_id_override,
         valid_override,
         existing_source,
-        statistic_id,
+        selected_statistic_id,
         fallback_statistic_id,
+        fallback_source,
     )
     return {
         "source": DOMAIN,
         "name": f"{identifier} {definition.name}",
-        "statistic_id": statistic_id,
+        "statistic_id": selected_statistic_id,
         "unit_of_measurement": definition.unit,
         "has_sum": definition.has_sum,
         "mean_type": definition.mean_type,

@@ -20,7 +20,9 @@ from custom_components.securemtr import (
     SecuremtrRuntimeData,
     _entry_display_name,
     _async_fetch_controller,
+    _async_fetch_statistic_metadata,
     _build_controller,
+    _build_statistic_metadata,
     _load_statistics_options,
     async_dispatch_runtime_update,
     async_run_with_reconnect,
@@ -29,6 +31,7 @@ from custom_components.securemtr import (
     async_unload_entry,
     runtime_update_signal,
     consumption_metrics,
+    STATISTIC_DEFINITIONS,
 )
 from custom_components.securemtr.beanbag import (
     BeanbagError,
@@ -55,8 +58,10 @@ from custom_components.securemtr.utils import report_day_for_sample, safe_anchor
 from homeassistant.components.recorder.statistics import (
     StatisticMeanType,
     StatisticMetaData,
+    valid_statistic_id,
 )
 from homeassistant.const import UnitOfEnergy, UnitOfTime
+from homeassistant.exceptions import HomeAssistantError
 from homeassistant.util import dt as dt_util
 
 
@@ -154,9 +159,19 @@ def fake_statistics_metadata(monkeypatch: pytest.MonkeyPatch) -> dict[str, Stati
                 result[statistic_id] = (index, existing)
         return result
 
+    class FakeRecorderInstance:
+        """Provide a lightweight recorder with executor-style lookups."""
+
+        async def async_add_executor_job(self, func, *args, **kwargs):
+            return func(*args, **kwargs)
+
     monkeypatch.setattr(
         "custom_components.securemtr.get_metadata",
         _get_metadata,
+    )
+    monkeypatch.setattr(
+        "custom_components.securemtr.recorder.get_instance",
+        lambda _hass: FakeRecorderInstance(),
     )
     return metadata
 
@@ -1518,6 +1533,282 @@ async def test_consumption_metrics_falls_back_on_conflicting_statistic_source(
         "conflicts with existing source" in record.message for record in caplog.records
     )
 
+
+@pytest.mark.asyncio
+async def test_consumption_metrics_retries_when_recorder_rejects_override(
+    monkeypatch: pytest.MonkeyPatch,
+    track_time_spy,
+    capture_statistics,
+    store_instances,
+) -> None:
+    """Ensure a recorder invalid source error triggers a fallback retry."""
+
+    hass = FakeHass()
+    track_time_spy(hass)
+    entry = DummyConfigEntry(
+        entry_id="metrics-source-retry",
+        unique_id="user@example.com",
+        data={"email": "user@example.com", "password": "digest"},
+        title="SecureMTR",
+    )
+
+    fake_session = object()
+    backend = FakeBeanbagBackend(fake_session)
+
+    monkeypatch.setattr(
+        "custom_components.securemtr.async_get_clientsession",
+        lambda hass_obj: fake_session,
+    )
+    monkeypatch.setattr(
+        "custom_components.securemtr.BeanbagBackend", lambda session: backend
+    )
+
+    attempts: list[str] = []
+
+    def _failing_capture(_hass, metadata, statistics):
+        attempts.append(metadata["statistic_id"])
+        if metadata["statistic_id"] == "sensor:serial_1_primary_energy_total":
+            raise HomeAssistantError("Invalid source")
+        capture_statistics[metadata["statistic_id"]] = (metadata, list(statistics))
+
+    monkeypatch.setattr(
+        "custom_components.securemtr.async_add_external_statistics",
+        _failing_capture,
+    )
+
+    assert await async_setup_entry(hass, entry)
+    await hass.async_block_till_done()
+
+    await consumption_metrics(hass, entry)
+
+    entry_slug = slugify_identifier(entry.title or entry.entry_id)
+    fallback_id = f"sensor:{DOMAIN}_{entry_slug}_primary_energy_kwh"
+
+    assert attempts[0] == "sensor:serial_1_primary_energy_total"
+    assert fallback_id in attempts
+    assert fallback_id in capture_statistics
+    assert "sensor:serial_1_primary_energy_total" not in capture_statistics
+
+
+@pytest.mark.asyncio
+async def test_async_fetch_statistic_metadata_without_recorder(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Return None when no recorder instance is available."""
+
+    hass = FakeHass()
+    monkeypatch.setattr(
+        "custom_components.securemtr.recorder.get_instance", lambda _hass: None
+    )
+
+    result = await _async_fetch_statistic_metadata(hass, "sensor:test_id")
+
+    assert result is None
+
+
+@pytest.mark.asyncio
+async def test_async_fetch_statistic_metadata_returns_metadata(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Return recorder metadata when a statistic exists."""
+
+    hass = FakeHass()
+    stored = {"source": DOMAIN, "name": "Existing", "statistic_id": "sensor:test_id"}
+
+    def _fake_get_metadata(
+        _hass, *, statistic_ids: set[str] | None = None, statistic_type=None, statistic_source=None
+    ) -> dict[str, tuple[int, StatisticMetaData]]:
+        assert statistic_ids == {"sensor:test_id"}
+        return {"sensor:test_id": (1, stored)}
+
+    class Recorder:
+        async def async_add_executor_job(self, func, *args, **kwargs):
+            return func(*args, **kwargs)
+
+    monkeypatch.setattr(
+        "custom_components.securemtr.get_metadata",
+        _fake_get_metadata,
+    )
+    monkeypatch.setattr(
+        "custom_components.securemtr.recorder.get_instance",
+        lambda _hass: Recorder(),
+    )
+
+    result = await _async_fetch_statistic_metadata(hass, "sensor:test_id")
+
+    assert result is stored
+
+
+@pytest.mark.asyncio
+async def test_build_statistic_metadata_generates_unique_fallback(
+    fake_statistics_metadata: dict[str, StatisticMetaData]
+) -> None:
+    """Ensure fallback IDs iterate when recorder metadata conflicts."""
+
+    hass = FakeHass()
+    entry_identifier = "SecureMTR"
+    entry_slug = "securemtr"
+    suffix = "primary_energy_kwh"
+    fallback_id = f"sensor:{DOMAIN}_{entry_slug}_{suffix}"
+
+    fake_statistics_metadata[fallback_id] = {
+        "source": "utility_meter",
+        "name": "Existing fallback",
+        "statistic_id": fallback_id,
+        "unit_of_measurement": UnitOfEnergy.KILO_WATT_HOUR,
+        "has_sum": True,
+        "mean_type": StatisticMeanType.NONE,
+    }
+
+    metadata = await _build_statistic_metadata(
+        hass,
+        entry_identifier,
+        entry_slug,
+        suffix,
+        STATISTIC_DEFINITIONS[suffix],
+        statistic_id_override=None,
+    )
+
+    assert metadata["statistic_id"].startswith(f"sensor:{DOMAIN}_{entry_slug}_{suffix}")
+    assert metadata["statistic_id"] != fallback_id
+    assert metadata["statistic_id"].endswith("_2")
+
+
+@pytest.mark.asyncio
+async def test_build_statistic_metadata_accepts_existing_override(
+    fake_statistics_metadata: dict[str, StatisticMetaData]
+) -> None:
+    """Keep overrides owned by SecureMTR without fallback."""
+
+    hass = FakeHass()
+    entry_identifier = "SecureMTR"
+    entry_slug = "securemtr"
+    suffix = "primary_energy_kwh"
+    override_id = "sensor:securemtr_custom_primary"
+
+    fake_statistics_metadata[override_id] = {
+        "source": DOMAIN,
+        "name": "SecureMTR Primary energy",
+        "statistic_id": override_id,
+        "unit_of_measurement": UnitOfEnergy.KILO_WATT_HOUR,
+        "has_sum": True,
+        "mean_type": StatisticMeanType.NONE,
+    }
+
+    metadata = await _build_statistic_metadata(
+        hass,
+        entry_identifier,
+        entry_slug,
+        suffix,
+        STATISTIC_DEFINITIONS[suffix],
+        statistic_id_override=override_id,
+    )
+
+    assert metadata["statistic_id"] == override_id
+
+
+@pytest.mark.asyncio
+async def test_build_statistic_metadata_warns_on_invalid_override(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Log a warning when an override is not a valid statistic ID."""
+
+    hass = FakeHass()
+    entry_identifier = "SecureMTR"
+    entry_slug = "securemtr"
+    suffix = "primary_energy_kwh"
+
+    with caplog.at_level(logging.WARNING):
+        metadata = await _build_statistic_metadata(
+            hass,
+            entry_identifier,
+            entry_slug,
+            suffix,
+            STATISTIC_DEFINITIONS[suffix],
+            statistic_id_override="sensor.invalid id",
+        )
+
+    assert "Ignoring invalid statistic_id override" in caplog.text
+    assert metadata["statistic_id"].startswith(f"sensor:{DOMAIN}_")
+
+
+@pytest.mark.asyncio
+async def test_build_statistic_metadata_reuses_securemtr_fallback(
+    fake_statistics_metadata: dict[str, StatisticMetaData]
+) -> None:
+    """Reuse fallback IDs that already belong to SecureMTR."""
+
+    hass = FakeHass()
+    entry_identifier = "SecureMTR"
+    entry_slug = "securemtr"
+    suffix = "primary_energy_kwh"
+    fallback_id = f"sensor:{DOMAIN}_{entry_slug}_{suffix}"
+
+    fake_statistics_metadata[fallback_id] = {
+        "source": DOMAIN,
+        "name": "Existing securemtr fallback",
+        "statistic_id": fallback_id,
+        "unit_of_measurement": UnitOfEnergy.KILO_WATT_HOUR,
+        "has_sum": True,
+        "mean_type": StatisticMeanType.NONE,
+    }
+
+    metadata = await _build_statistic_metadata(
+        hass,
+        entry_identifier,
+        entry_slug,
+        suffix,
+        STATISTIC_DEFINITIONS[suffix],
+        statistic_id_override=None,
+    )
+
+    assert metadata["statistic_id"] == fallback_id
+
+
+@pytest.mark.asyncio
+async def test_build_statistic_metadata_logs_invalid_generated_fallback(
+    fake_statistics_metadata: dict[str, StatisticMetaData],
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Log when generated fallback IDs do not pass recorder validation."""
+
+    hass = FakeHass()
+    entry_identifier = "SecureMTR"
+    entry_slug = "securemtr"
+    suffix = "primary_energy_kwh"
+    fallback_id = f"sensor:{DOMAIN}_{entry_slug}_{suffix}"
+
+    fake_statistics_metadata[fallback_id] = {
+        "source": "utility_meter",
+        "name": "Existing fallback",
+        "statistic_id": fallback_id,
+        "unit_of_measurement": UnitOfEnergy.KILO_WATT_HOUR,
+        "has_sum": True,
+        "mean_type": StatisticMeanType.NONE,
+    }
+
+    original_valid = valid_statistic_id
+
+    def _fake_valid(statistic_id: str) -> bool:
+        if statistic_id.endswith("_2"):
+            return False
+        return original_valid(statistic_id)
+
+    monkeypatch.setattr("custom_components.securemtr.valid_statistic_id", _fake_valid)
+
+    with caplog.at_level(logging.ERROR):
+        metadata = await _build_statistic_metadata(
+            hass,
+            entry_identifier,
+            entry_slug,
+            suffix,
+            STATISTIC_DEFINITIONS[suffix],
+            statistic_id_override=None,
+        )
+
+    assert metadata["statistic_id"].endswith("_2")
+    assert "Generated fallback statistic_id" in caplog.text
 
 def test_load_statistics_options_prefers_hass_timezone() -> None:
     """Ensure statistics options honour the Home Assistant timezone."""
