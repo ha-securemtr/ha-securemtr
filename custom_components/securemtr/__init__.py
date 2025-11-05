@@ -31,6 +31,7 @@ from homeassistant.const import (
     EVENT_HOMEASSISTANT_CLOSE,
     UnitOfEnergy,
 )
+from homeassistant.components.sensor import SensorStateClass
 from homeassistant.core import HomeAssistant, ServiceCall
 from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers import config_validation as cv, entity_registry as er
@@ -647,11 +648,10 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         async_track_time_change(
             hass,
             _scheduled_consumption_refresh,
-            hour=scheduled_hour,
+            hour=1,
             minute=0,
             second=0,
         )
-        for scheduled_hour in (1, 13)
     ]
 
     def _unsubscribe_schedules() -> None:
@@ -1584,6 +1584,7 @@ async def consumption_metrics(hass: HomeAssistant, entry: ConfigEntry) -> None:
             "statistic_id": statistic_id,
             "unit_of_measurement": UnitOfEnergy.KILO_WATT_HOUR,
             "unit_class": "energy",
+            "state_characteristic": SensorStateClass.TOTAL_INCREASING,
         }
         async_add_external_statistics(hass, metadata, samples)
 
@@ -1749,7 +1750,7 @@ def _build_zone_statistics_samples(
         cumulative += slot_energy
         records.append(
             StatisticData(
-                start=slot_start,
+                start=dt_util.as_utc(slot_start),
                 sum=cumulative,
                 state=cumulative,
             )

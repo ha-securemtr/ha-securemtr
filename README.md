@@ -115,7 +115,7 @@ SecureMTR exposes cumulative totals that follow the [Home Assistant Energy](http
 ### What to expect after installation
 
 - **No backfill before the first reading:** Home Assistant shows `0 kWh` for days before the sensor emits its first numeric state inside that day’s statistics window. This is normal right after install or if you reset the accumulator.
-- **Fresh samples automatically:** The integration refreshes consumption metrics immediately after Home Assistant restarts and then at 01:00 and 13:00 local time each day. These checkpoints keep the Energy Dashboard supplied with data without extra automations.
+- **Fresh samples automatically:** The integration refreshes consumption metrics immediately after Home Assistant restarts and then at 01:00 local time each day. This nightly checkpoint keeps the Energy Dashboard supplied with data without extra automations.
 - **Monotonic totals:** Each energy sensor keeps a private per-day ledger and applies a monotonic `offset_kwh` whenever a past day is revised downward, so the publicly exposed total never decreases. You can see the attributes in **Developer Tools → States** once the nightly import finishes:
   - `last_report_day`: Date of the most recently processed ledger entry.
   - `series_start_day`: Earliest day stored for the running total.

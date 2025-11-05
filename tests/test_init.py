@@ -187,6 +187,7 @@ def stub_external_statistics(monkeypatch: pytest.MonkeyPatch) -> None:
         if "." in domain:
             domain = domain.split(".", 1)[0]
         assert metadata["source"] == domain
+        assert metadata["state_characteristic"] == STATE_CLASS_TOTAL_INCREASING
 
     monkeypatch.setattr(
         "custom_components.securemtr.async_add_external_statistics",
@@ -866,7 +867,6 @@ async def test_async_setup_entry_starts_backend(
     assert callbacks
     assert [callback_info[1:] for callback_info in callbacks] == [
         (1, 0, 0),
-        (13, 0, 0),
     ]
     assert fake_metrics.await_args_list == [call(hass, entry)]
 
@@ -874,15 +874,6 @@ async def test_async_setup_entry_starts_backend(
     callback(datetime.now(timezone.utc))
     await hass.async_block_till_done()
     assert fake_metrics.await_args_list == [call(hass, entry), call(hass, entry)]
-
-    midday_callback = callbacks[1][0]
-    midday_callback(datetime.now(timezone.utc))
-    await hass.async_block_till_done()
-    assert fake_metrics.await_args_list == [
-        call(hass, entry),
-        call(hass, entry),
-        call(hass, entry),
-    ]
 
     meters = hass.config_entries.async_entries(UTILITY_METER_DOMAIN)
     assert len(meters) == 4
@@ -912,7 +903,7 @@ async def test_consumption_scheduler_fires_with_frozen_clock(
     track_time_spy,
     store_instances,
 ) -> None:
-    """Ensure the twice-daily scheduler and immediate refresh run deterministically."""
+    """Ensure the daily 01:00 scheduler and immediate refresh run deterministically."""
 
     hass = FakeHass()
     callbacks = track_time_spy(hass)
@@ -945,30 +936,24 @@ async def test_consumption_scheduler_fires_with_frozen_clock(
 
     assert fake_metrics.await_args_list == [call(hass, entry)]
     assert start_backend.await_count == 1
-    assert len(callbacks) == 2
+    assert len(callbacks) == 1
     assert [callback_info[1:] for callback_info in callbacks] == [
         (1, 0, 0),
-        (13, 0, 0),
     ]
 
     morning = datetime(2024, 8, 20, 1, 0, tzinfo=timezone.utc)
     await asyncio.to_thread(callbacks[0][0], morning)
     await hass.async_block_till_done()
 
-    midday = datetime(2024, 8, 20, 13, 0, tzinfo=timezone.utc)
-    callbacks[1][0](midday)
-    await hass.async_block_till_done()
-
     original_loop = hass.loop
     hass.loop = None
     try:
-        callbacks[0][0](midday)
+        callbacks[0][0](morning)
         await hass.async_block_till_done()
     finally:
         hass.loop = original_loop
 
     assert fake_metrics.await_args_list == [
-        call(hass, entry),
         call(hass, entry),
         call(hass, entry),
         call(hass, entry),
@@ -981,13 +966,11 @@ async def test_consumption_scheduler_fires_with_frozen_clock(
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    ("scenario", "callback_index"),
+    "scenario",
     (
-        ("spring_morning", 0),
-        ("autumn_first_morning", 0),
-        ("autumn_second_morning", 0),
-        ("spring_midday", 1),
-        ("autumn_midday", 1),
+        "spring_morning",
+        "autumn_first_morning",
+        "autumn_second_morning",
     ),
 )
 async def test_consumption_scheduler_handles_dst_transitions(
@@ -995,7 +978,6 @@ async def test_consumption_scheduler_handles_dst_transitions(
     track_time_spy,
     store_instances,
     scenario: str,
-    callback_index: int,
 ) -> None:
     """Ensure the scheduler fires at local hours around DST boundaries."""
 
@@ -1031,10 +1013,9 @@ async def test_consumption_scheduler_handles_dst_transitions(
     assert await async_setup_entry(hass, entry)
     await hass.async_block_till_done()
 
-    assert len(callbacks) == 2
-    callback = callbacks[callback_index]
-    expected_hour = 1 if callback_index == 0 else 13
-    assert callback[1:] == (expected_hour, 0, 0)
+    assert len(callbacks) == 1
+    callback = callbacks[0]
+    assert callback[1:] == (1, 0, 0)
 
     assert fake_metrics.await_args_list == [call(hass, entry)]
 
@@ -1044,10 +1025,8 @@ async def test_consumption_scheduler_handles_dst_transitions(
         event = datetime(2024, 10, 27, 1, 0, tzinfo=london, fold=0)
     elif scenario == "autumn_second_morning":
         event = datetime(2024, 10, 27, 1, 0, tzinfo=london, fold=1)
-    elif scenario == "spring_midday":
-        event = datetime(2024, 3, 31, 13, 0, tzinfo=london)
     else:
-        event = datetime(2024, 10, 27, 13, 0, tzinfo=london)
+        event = datetime(2024, 10, 27, 1, 0, tzinfo=london, fold=1)
 
     callback[0](event)
     await hass.async_block_till_done()
@@ -1945,7 +1924,7 @@ async def test_consumption_metrics_emits_hourly_statistics(
     assert len(samples) == 3
     starts = [sample["start"] for sample in samples]
     assert [start.hour for start in starts] == [5, 6, 7]
-    assert all(start.tzinfo == ZoneInfo("Europe/London") for start in starts)
+    assert all(start.tzinfo == timezone.utc for start in starts)
 
     sums = [sample["sum"] for sample in samples]
     assert sums == pytest.approx([2.85, 5.7, 6.175])
