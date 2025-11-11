@@ -19,6 +19,7 @@ from custom_components.securemtr import (
 )
 from custom_components.securemtr.beanbag import BeanbagError, DailyProgram
 from custom_components.securemtr.button import (
+    BOOST_BUTTON_METADATA,
     SecuremtrCancelBoostButton,
     SecuremtrConsumptionMetricsButton,
     SecuremtrLogWeeklyScheduleButton,
@@ -140,14 +141,17 @@ async def test_button_setup_creates_entities() -> None:
 
     await async_setup_entry(hass, entry, _add_entities)
 
-    assert {entity.unique_id for entity in entities} == {
-        "serial_1_boost_30",
-        "serial_1_boost_60",
-        "serial_1_boost_120",
-        "serial_1_boost_cancel",
-        "serial_1_refresh_consumption",
-        "serial_1_log_schedule",
+    expected_ids = {
+        f"serial_1_boost_{metadata.duration_minutes}" for metadata in BOOST_BUTTON_METADATA
     }
+    expected_ids.update(
+        {
+            "serial_1_boost_cancel",
+            "serial_1_refresh_consumption",
+            "serial_1_log_schedule",
+        }
+    )
+    assert {entity.unique_id for entity in entities} == expected_ids
 
     cancel_button = next(
         entity for entity in entities if entity.unique_id.endswith("boost_cancel")
@@ -171,7 +175,10 @@ async def test_button_setup_creates_entities() -> None:
         entity for entity in entities if entity.unique_id.endswith("boost_60")
     )
     assert boost_button.device_info["name"] == "E7+ Smart Water Heater Controller"
-    assert boost_button.translation_key == "boost_60_minutes"
+    metadata_60 = next(
+        metadata for metadata in BOOST_BUTTON_METADATA if metadata.duration_minutes == 60
+    )
+    assert boost_button.translation_key == metadata_60.translation_key
     assert boost_button.has_entity_name is True
 
 

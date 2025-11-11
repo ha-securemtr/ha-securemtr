@@ -13,6 +13,7 @@ from homeassistant.core import HomeAssistant
 from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.util import dt as dt_util
+from typing import Final, NamedTuple
 
 from . import (
     SecuremtrController,
@@ -27,6 +28,14 @@ from .runtime_helpers import async_read_zone_program
 
 _LOGGER = logging.getLogger(__name__)
 
+
+class BoostButtonMetadata(NamedTuple):
+    """Describe the metadata associated with a timed boost button."""
+
+    duration_minutes: int
+    translation_key: str
+
+
 _DAY_NAMES: tuple[str, ...] = (
     "Monday",
     "Tuesday",
@@ -38,13 +47,17 @@ _DAY_NAMES: tuple[str, ...] = (
 )
 
 
-BOOST_BUTTON_TRANSLATION_KEYS: dict[int, str] = {
-    30: "boost_30_minutes",
-    60: "boost_60_minutes",
-    120: "boost_120_minutes",
+BOOST_BUTTON_METADATA: Final[tuple[BoostButtonMetadata, ...]] = (
+    BoostButtonMetadata(30, "boost_30_minutes"),
+    BoostButtonMetadata(60, "boost_60_minutes"),
+    BoostButtonMetadata(120, "boost_120_minutes"),
+)
+
+_BOOST_BUTTON_METADATA_MAP: Final[dict[int, BoostButtonMetadata]] = {
+    metadata.duration_minutes: metadata for metadata in BOOST_BUTTON_METADATA
 }
 
-DEFAULT_BOOST_TRANSLATION_KEY = "boost_custom_minutes"
+CUSTOM_BOOST_TRANSLATION_KEY: Final[str] = "boost_custom_minutes"
 
 
 async def async_setup_entry(
@@ -56,11 +69,13 @@ async def async_setup_entry(
 
     runtime, controller = await async_get_ready_controller(hass, entry)
 
+    timed_boost_buttons = [
+        SecuremtrTimedBoostButton(runtime, controller, entry, metadata.duration_minutes)
+        for metadata in BOOST_BUTTON_METADATA
+    ]
     async_add_entities(
         [
-            SecuremtrTimedBoostButton(runtime, controller, entry, 30),
-            SecuremtrTimedBoostButton(runtime, controller, entry, 60),
-            SecuremtrTimedBoostButton(runtime, controller, entry, 120),
+            *timed_boost_buttons,
             SecuremtrCancelBoostButton(runtime, controller, entry),
             SecuremtrConsumptionMetricsButton(runtime, controller, entry),
             SecuremtrLogWeeklyScheduleButton(runtime, controller, entry),
@@ -229,12 +244,12 @@ class SecuremtrTimedBoostButton(SecuremtrRuntimeEntityMixin, ButtonEntity):
         super().__init__(runtime, controller, entry)
         self._duration = duration_minutes
         self._attr_unique_id = f"{self._identifier_slug()}_boost_{duration_minutes}"
-        translation_key = BOOST_BUTTON_TRANSLATION_KEYS.get(
-            duration_minutes, DEFAULT_BOOST_TRANSLATION_KEY
-        )
-        self._attr_translation_key = translation_key
-        if translation_key == DEFAULT_BOOST_TRANSLATION_KEY:
+        metadata = _BOOST_BUTTON_METADATA_MAP.get(duration_minutes)
+        if metadata is None:
+            self._attr_translation_key = CUSTOM_BOOST_TRANSLATION_KEY
             self._attr_translation_placeholders = {"duration": str(duration_minutes)}
+        else:
+            self._attr_translation_key = metadata.translation_key
 
     async def async_press(self) -> None:
         """Send the timed boost start command for the configured duration."""
@@ -322,6 +337,7 @@ class SecuremtrCancelBoostButton(SecuremtrRuntimeEntityMixin, ButtonEntity):
 
 
 __all__ = [
+    "BOOST_BUTTON_METADATA",
     "SecuremtrCancelBoostButton",
     "SecuremtrConsumptionMetricsButton",
     "SecuremtrLogWeeklyScheduleButton",
