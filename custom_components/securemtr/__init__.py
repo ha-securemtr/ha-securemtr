@@ -74,6 +74,7 @@ CONFIG_SCHEMA = cv.config_entry_only_config_schema(DOMAIN)
 
 DEFAULT_DEVICE_LABEL = "E7+ Smart Water Heater Controller"
 
+CONF_GATEWAY_ID = "gateway_id"
 CONF_METER_DELTA_VALUES = "delta_values"
 CONF_METER_NET_CONSUMPTION = "net_consumption"
 CONF_METER_OFFSET = "offset"
@@ -1067,6 +1068,28 @@ async def _async_handle_backend_success(
     if refresh_callback is not None and runtime.consumption_refresh_pending:
         _invoke_refresh_callback(refresh_callback, entry_identifier)
 
+    controller = runtime.controller
+    helper = getattr(hass, "config_entries", None)
+    if controller is not None and helper is not None:
+        updater = getattr(helper, "async_update_entry", None)
+        if callable(updater):
+            data: dict[str, Any] = dict(entry.data)
+            updated = False
+
+            serial = controller.serial_number
+            if isinstance(serial, str) and serial.strip():
+                cleaned_serial = serial.strip()
+                if data.get("serial_number") != cleaned_serial:
+                    data["serial_number"] = cleaned_serial
+                    updated = True
+
+            if controller.gateway_id and data.get(CONF_GATEWAY_ID) != controller.gateway_id:
+                data[CONF_GATEWAY_ID] = controller.gateway_id
+                updated = True
+
+            if updated:
+                await updater(entry, data=data)
+
 
 async def _async_refresh_connection(
     entry: ConfigEntry, runtime: SecuremtrRuntimeData
@@ -1250,12 +1273,32 @@ async def _async_fetch_controller(
     if session is None or websocket is None:
         raise BeanbagError("Beanbag session or websocket is unavailable")
 
-    if not session.gateways:
+    gateways = list(session.gateways)
+
+    if not gateways:
         raise BeanbagError(
             f"No Beanbag gateways available for entry {entry_identifier}"
         )
 
-    gateway = session.gateways[0]
+    stored_gateway_id = entry.data.get(CONF_GATEWAY_ID)
+    stored_serial = entry.data.get("serial_number")
+
+    def _match_gateway(candidate: BeanbagGateway) -> bool:
+        """Return whether the gateway matches stored config metadata."""
+
+        if stored_gateway_id and candidate.gateway_id == stored_gateway_id:
+            return True
+
+        if stored_serial and isinstance(candidate.serial_number, str):
+            if candidate.serial_number.strip() == stored_serial:
+                return True
+
+        return False
+
+    gateway = next((item for item in gateways if _match_gateway(item)), None)
+
+    if gateway is None:
+        gateway = gateways[0]
     backend = runtime.backend
 
     runtime.zone_topology = await backend.read_zone_topology(

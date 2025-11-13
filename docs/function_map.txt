@@ -16,9 +16,9 @@ custom_components.securemtr.__init__.async_unload_entry: Unload a securemtr conf
 custom_components.securemtr.__init__._async_start_backend: Authenticate with Beanbag and establish the WebSocket connection.
 custom_components.securemtr.__init__._async_attempt_backend_startup: Attempt a single Beanbag login and controller discovery cycle.
 custom_components.securemtr.__init__._async_queue_backend_retry: Schedule background retries for establishing the Beanbag backend connection and trigger a callback once successful.
-custom_components.securemtr.__init__._async_handle_backend_success: Complete backend startup by provisioning utility meters, logging success, and invoking pending refresh callbacks.
+custom_components.securemtr.__init__._async_handle_backend_success: Complete backend startup by provisioning utility meters, logging success, updating entry metadata, and invoking pending refresh callbacks.
 custom_components.securemtr.__init__._async_refresh_connection: Ensure the Beanbag WebSocket connection is available, reconnecting with stored credentials when required.
-custom_components.securemtr.__init__._async_fetch_controller: Retrieve controller metadata via the Beanbag WebSocket.
+custom_components.securemtr.__init__._async_fetch_controller: Retrieve controller metadata via the Beanbag WebSocket, preferring the stored gateway identifier or serial number when selecting a controller.
 custom_components.securemtr.__init__._build_controller: Translate metadata and gateway context into a controller object.
 custom_components.securemtr.__init__._async_fetch_energy_samples: Fetch energy history for the active controller with reconnection.
 custom_components.securemtr.__init__.consumption_metrics: Coordinate connection validation, sample preparation, zone processing, statistic submission, and runtime updates for daily energy history.
@@ -49,7 +49,12 @@ custom_components.securemtr.__init__._normalize_identifier: Return a sanitized i
 custom_components.securemtr.__init__.runtime_update_signal: Return the dispatcher signal name for runtime updates.
 custom_components.securemtr.__init__.async_dispatch_runtime_update: Notify entities that runtime state has been updated.
 custom_components.securemtr.__init__.coerce_end_time: Convert an end-minute payload into an aware datetime.
-custom_components.securemtr.config_flow.SecuremtrConfigFlow.async_step_user: Handle the initial user configuration step, enforcing the Secure Controls 12-character password limit, storing the MD5 digest, and assigning a generic entry title.
+custom_components.securemtr.config_flow.SecuremtrConfigFlow.__init__: Initialise flow state for credential storage and gateway enumeration.
+custom_components.securemtr.config_flow.SecuremtrConfigFlow.async_step_user: Handle the initial user configuration step, enforcing credential rules, authenticating to list gateways, and delegating to selection when required.
+custom_components.securemtr.config_flow.SecuremtrConfigFlow.async_step_gateway: Prompt the user to choose a gateway when multiple controllers are available.
+custom_components.securemtr.config_flow.SecuremtrConfigFlow._async_login_gateways: Authenticate with Beanbag to enumerate available gateways during setup.
+custom_components.securemtr.config_flow.SecuremtrConfigFlow._async_create_config_entry: Persist credentials and the chosen gateway into a config entry.
+custom_components.securemtr.config_flow.SecuremtrConfigFlow._gateway_label: Build a human-readable option label for a discovered gateway.
 custom_components.securemtr.config_flow._anchor_option_to_time: Return an anchor time for the provided stored option.
 custom_components.securemtr.config_flow._serialize_anchor: Return an ISO-formatted anchor string for storage.
 custom_components.securemtr.config_flow.SecuremtrConfigFlow.async_get_options_flow: Return the options flow handler for SecureMTR.

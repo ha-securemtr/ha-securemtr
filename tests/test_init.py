@@ -10,7 +10,7 @@ from datetime import date, datetime, time, timedelta, timezone
 from decimal import Decimal
 from itertools import accumulate
 from contextlib import suppress
-from typing import Any, Awaitable, Callable, Iterable, cast
+from typing import Any, Awaitable, Callable, Iterable, Mapping, cast
 from types import MappingProxyType, ModuleType, SimpleNamespace
 from unittest.mock import AsyncMock, call
 
@@ -78,6 +78,7 @@ from custom_components.securemtr import (
     _update_runtime_state,
     UTILITY_METER_CYCLES,
     UTILITY_METER_DOMAIN,
+    CONF_GATEWAY_ID,
 )
 import custom_components.securemtr as securemtr_module
 from custom_components.securemtr.energy import EnergyAccumulator
@@ -315,7 +316,12 @@ async def test_close_client_session_invokes_async_close() -> None:
 class FakeBeanbagBackend:
     """Capture login requests and provide canned responses."""
 
-    def __init__(self, session: object) -> None:
+    def __init__(
+        self,
+        session: object,
+        *,
+        gateways: tuple[BeanbagGateway, ...] | None = None,
+    ) -> None:
         self.session = session
         self.login_calls: list[tuple[str, str]] = []
         self.zone_calls: list[str] = []
@@ -326,20 +332,23 @@ class FakeBeanbagBackend:
         self.state_calls: list[str] = []
         self.energy_history_calls: list[tuple[str, int]] = []
         self.program_calls: list[tuple[str, str]] = []
-        self._session = BeanbagSession(
-            user_id=1,
-            session_id="session-id",
-            token="jwt-token",
-            token_timestamp=None,
-            gateways=(
+        if gateways is None:
+            gateways = (
                 BeanbagGateway(
                     gateway_id="gateway-1",
                     serial_number="serial-1",
                     host_name="host-name",
                     capabilities={},
                 ),
-            ),
+            )
+        self._session = BeanbagSession(
+            user_id=1,
+            session_id="session-id",
+            token="jwt-token",
+            token_timestamp=None,
+            gateways=gateways,
         )
+        self._gateway_map = {gateway.gateway_id: gateway for gateway in gateways}
         self.websocket = FakeWebSocket()
         self._primary_program: WeeklyProgram = tuple(
             DailyProgram((120, None, None), (240, None, None)) for _ in range(7)
@@ -348,14 +357,20 @@ class FakeBeanbagBackend:
             DailyProgram((1020, None, None), (1080, None, None)) for _ in range(7)
         )
 
+    async def login(self, email: str, password_digest: str) -> BeanbagSession:
+        """Record credentials and return the cached session."""
+
+        self.login_calls.append((email, password_digest))
+        return self._session
+
     async def login_and_connect(
         self, email: str, password_digest: str
     ) -> tuple[BeanbagSession, FakeWebSocket]:
         """Record the credentials and return canned connection artefacts."""
 
-        self.login_calls.append((email, password_digest))
+        session = await self.login(email, password_digest)
         self.websocket = FakeWebSocket()
-        return self._session, self.websocket
+        return session, self.websocket
 
     async def read_device_metadata(
         self, session: BeanbagSession, websocket: FakeWebSocket, gateway_id: str
@@ -363,10 +378,16 @@ class FakeBeanbagBackend:
         """Return canned metadata for the sole controller."""
 
         self.metadata_calls.append(gateway_id)
+        gateway = self._gateway_map.get(gateway_id)
+        serial = None
+        if gateway is not None and isinstance(gateway.serial_number, str):
+            serial = gateway.serial_number
+
+        suffix = gateway_id.split("-", 1)[-1]
         return {
-            "BOI": "controller-1",
+            "BOI": f"controller-{suffix}",
             "N": "E7+ Controller",
-            "SN": "serial-1",
+            "SN": serial or "serial-1",
             "FV": "1.0.0",
             "MD": "E7+",
         }
@@ -638,6 +659,20 @@ class FakeConfigEntries:
             self._entries.pop(entry_id)
         if entry_id in self._order:
             self._order.remove(entry_id)
+
+    async def async_update_entry(
+        self,
+        entry: DummyConfigEntry,
+        *,
+        data: Mapping[str, Any] | None = None,
+        options: Mapping[str, Any] | None = None,
+    ) -> None:
+        """Persist updates to a config entry for assertions."""
+
+        if data is not None:
+            entry.data = dict(data)
+        if options is not None:
+            entry.options = dict(options)
 
 
 @dataclass(slots=True)
@@ -3553,6 +3588,111 @@ async def test_async_fetch_controller_requires_connection() -> None:
 
     with pytest.raises(BeanbagError):
         await _async_fetch_controller(entry, runtime)
+
+
+@pytest.mark.asyncio
+async def test_async_fetch_controller_respects_configured_gateway_id() -> None:
+    """Ensure gateway selection prefers the stored identifier when present."""
+
+    gateways = (
+        BeanbagGateway(
+            gateway_id="gateway-1",
+            serial_number="serial-1",
+            host_name="host-one",
+            capabilities={},
+        ),
+        BeanbagGateway(
+            gateway_id="gateway-2",
+            serial_number="serial-2",
+            host_name="host-two",
+            capabilities={},
+        ),
+    )
+    backend = FakeBeanbagBackend(object(), gateways=gateways)
+    runtime = SecuremtrRuntimeData(backend=backend)
+    runtime.session = backend._session
+    runtime.websocket = backend.websocket
+
+    entry = DummyConfigEntry(
+        entry_id="fetch-configured",
+        unique_id="user@example.com",
+        data={CONF_GATEWAY_ID: "gateway-2"},
+    )
+
+    controller = await _async_fetch_controller(entry, runtime)
+
+    assert controller.gateway_id == "gateway-2"
+    assert backend.metadata_calls[0] == "gateway-2"
+
+
+@pytest.mark.asyncio
+async def test_async_fetch_controller_matches_serial_when_id_missing() -> None:
+    """Ensure gateway selection falls back to the stored serial number."""
+
+    gateways = (
+        BeanbagGateway(
+            gateway_id="gateway-1",
+            serial_number="serial-1",
+            host_name="host-one",
+            capabilities={},
+        ),
+        BeanbagGateway(
+            gateway_id="gateway-2",
+            serial_number="serial-2",
+            host_name="host-two",
+            capabilities={},
+        ),
+    )
+    backend = FakeBeanbagBackend(object(), gateways=gateways)
+    runtime = SecuremtrRuntimeData(backend=backend)
+    runtime.session = backend._session
+    runtime.websocket = backend.websocket
+
+    entry = DummyConfigEntry(
+        entry_id="fetch-serial",
+        unique_id="user@example.com",
+        data={"serial_number": "serial-2"},
+    )
+
+    controller = await _async_fetch_controller(entry, runtime)
+
+    assert controller.gateway_id == "gateway-2"
+    assert backend.metadata_calls[0] == "gateway-2"
+
+
+@pytest.mark.asyncio
+async def test_async_fetch_controller_defaults_to_first_gateway() -> None:
+    """Ensure the first gateway is used when no config metadata is present."""
+
+    gateways = (
+        BeanbagGateway(
+            gateway_id="gateway-1",
+            serial_number="serial-1",
+            host_name="host-one",
+            capabilities={},
+        ),
+        BeanbagGateway(
+            gateway_id="gateway-2",
+            serial_number="serial-2",
+            host_name="host-two",
+            capabilities={},
+        ),
+    )
+    backend = FakeBeanbagBackend(object(), gateways=gateways)
+    runtime = SecuremtrRuntimeData(backend=backend)
+    runtime.session = backend._session
+    runtime.websocket = backend.websocket
+
+    entry = DummyConfigEntry(
+        entry_id="fetch-default",
+        unique_id="user@example.com",
+        data={},
+    )
+
+    controller = await _async_fetch_controller(entry, runtime)
+
+    assert controller.gateway_id == "gateway-1"
+    assert backend.metadata_calls[0] == "gateway-1"
 
 
 @pytest.mark.asyncio
