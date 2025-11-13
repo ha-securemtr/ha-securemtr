@@ -15,7 +15,13 @@ from homeassistant.helpers.selector import selector
 from homeassistant.util import dt as dt_util
 import voluptuous as vol
 
-from . import DOMAIN
+from . import (
+    CONF_GATEWAY_ID,
+    DOMAIN,
+    _async_close_client_session,
+    async_get_clientsession,
+)
+from .beanbag import BeanbagBackend, BeanbagError, BeanbagGateway, BeanbagSession
 
 CONF_PRIMARY_ANCHOR = "primary_anchor"
 CONF_BOOST_ANCHOR = "boost_anchor"
@@ -72,6 +78,13 @@ class SecuremtrConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
 
     VERSION = 1
 
+    def __init__(self) -> None:
+        """Initialise flow state for credential and gateway handling."""
+
+        self._email: str | None = None
+        self._password_digest: str | None = None
+        self._gateways: tuple[BeanbagGateway, ...] = ()
+
     async def async_step_user(
         self, user_input: dict[str, Any] | None = None
     ) -> FlowResult:
@@ -115,11 +128,43 @@ class SecuremtrConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
 
             hashed_password = hashlib.md5(password.encode("utf-8")).hexdigest()
 
+            try:
+                session = await self._async_login_gateways(email, hashed_password)
+            except BeanbagError:
+                _LOGGER.error("Secure Controls login failed during configuration")
+                return self.async_show_form(
+                    step_id="user",
+                    data_schema=STEP_USER_DATA_SCHEMA,
+                    errors={"base": "cannot_connect"},
+                )
+            except Exception:
+                _LOGGER.exception("Unexpected error during Secure Controls login")
+                return self.async_show_form(
+                    step_id="user",
+                    data_schema=STEP_USER_DATA_SCHEMA,
+                    errors={"base": "unknown"},
+                )
+
+            gateways = session.gateways
+            if not gateways:
+                _LOGGER.error(
+                    "Secure Controls account has no associated gateways during setup"
+                )
+                return self.async_show_form(
+                    step_id="user",
+                    data_schema=STEP_USER_DATA_SCHEMA,
+                    errors={"base": "cannot_connect"},
+                )
+
+            self._email = email
+            self._password_digest = hashed_password
+            self._gateways = gateways
+
             _LOGGER.info("Secure Controls app credentials accepted")
-            return self.async_create_entry(
-                title="SecureMTR",
-                data={CONF_EMAIL: email, CONF_PASSWORD: hashed_password},
-            )
+            if len(gateways) == 1:
+                return self._async_create_config_entry(gateways[0])
+
+            return await self.async_step_gateway()
 
         _LOGGER.info(
             "Displaying SecureMTR configuration form for Secure Controls credentials"
@@ -128,6 +173,71 @@ class SecuremtrConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             step_id="user",
             data_schema=STEP_USER_DATA_SCHEMA,
         )
+
+    async def async_step_gateway(
+        self, user_input: dict[str, Any] | None = None
+    ) -> FlowResult:
+        """Handle gateway selection when multiple controllers are available."""
+
+        if user_input is not None:
+            gateway_id = user_input[CONF_GATEWAY_ID]
+            gateway = next(
+                (item for item in self._gateways if item.gateway_id == gateway_id),
+                None,
+            )
+
+            if gateway is None:
+                _LOGGER.error("Invalid gateway selection %s", gateway_id)
+                return await self.async_step_gateway()
+
+            return self._async_create_config_entry(gateway)
+
+        options = {
+            gateway.gateway_id: self._gateway_label(gateway)
+            for gateway in self._gateways
+        }
+
+        schema = vol.Schema({vol.Required(CONF_GATEWAY_ID): vol.In(options)})
+        return self.async_show_form(step_id="gateway", data_schema=schema)
+
+    async def _async_login_gateways(
+        self, email: str, password_digest: str
+    ) -> BeanbagSession:
+        """Authenticate with Beanbag to enumerate available gateways."""
+
+        session = async_get_clientsession(self.hass)
+        backend = BeanbagBackend(session)
+        try:
+            return await backend.login(email, password_digest)
+        finally:
+            await _async_close_client_session(session)
+
+    def _async_create_config_entry(self, gateway: BeanbagGateway) -> FlowResult:
+        """Create the config entry once a gateway has been selected."""
+
+        if self._email is None or self._password_digest is None:
+            raise ValueError("Credential state unavailable for entry creation")
+
+        data: dict[str, Any] = {
+            CONF_EMAIL: self._email,
+            CONF_PASSWORD: self._password_digest,
+            CONF_GATEWAY_ID: gateway.gateway_id,
+        }
+
+        serial = gateway.serial_number
+        if isinstance(serial, str) and serial.strip():
+            data["serial_number"] = serial.strip()
+
+        return self.async_create_entry(title="SecureMTR", data=data)
+
+    @staticmethod
+    def _gateway_label(gateway: BeanbagGateway) -> str:
+        """Return a human-friendly label for a discovered gateway."""
+
+        serial = gateway.serial_number
+        if isinstance(serial, str) and serial.strip():
+            return f"{serial.strip()} ({gateway.gateway_id})"
+        return gateway.gateway_id
 
     @staticmethod
     def async_get_options_flow(
