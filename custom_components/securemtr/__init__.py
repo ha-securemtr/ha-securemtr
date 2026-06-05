@@ -2244,6 +2244,8 @@ async def _async_refresh_local_ble_runtime(
         return
 
     from .local_ble_commissioning import (  # noqa: PLC0415
+        BLE_BACKGROUND_REFRESH_RETRY_LIMIT,
+        BLE_COMMAND_RETRY_LIMIT,
         LocalBleCommissioningError,
         LocalBlePriority,
     )
@@ -2254,9 +2256,17 @@ async def _async_refresh_local_ble_runtime(
         resolved_priority = (
             LocalBlePriority.BACKGROUND_REFRESH if priority is None else priority
         )
+        # Cap the periodic refresh's retries so it cannot block a queued user
+        # command for long; explicit refreshes keep the full budget.
+        resolved_retry_limit = (
+            BLE_BACKGROUND_REFRESH_RETRY_LIMIT
+            if resolved_priority == LocalBlePriority.BACKGROUND_REFRESH
+            else BLE_COMMAND_RETRY_LIMIT
+        )
         snapshot = await worker.async_read_local_snapshot(
             priority=resolved_priority,
             coalesce_key=coalesce_key,
+            retry_limit=resolved_retry_limit,
         )
     except HomeAssistantError as error:
         _LOGGER.debug(

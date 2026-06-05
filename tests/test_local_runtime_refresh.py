@@ -56,7 +56,9 @@ def _patch_snapshot_worker(
 ) -> tuple[Any, AsyncMock]:
     """Patch the local BLE worker helper to return a snapshot stub."""
 
-    fake_worker = SimpleNamespace(async_read_local_snapshot=AsyncMock(return_value=snapshot))
+    fake_worker = SimpleNamespace(
+        async_read_local_snapshot=AsyncMock(return_value=snapshot),
+    )
     get_worker = AsyncMock(return_value=fake_worker)
     monkeypatch.setattr("custom_components.securemtr.async_get_local_ble_worker", get_worker)
     return fake_worker, get_worker

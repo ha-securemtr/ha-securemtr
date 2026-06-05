@@ -47,8 +47,13 @@ PACKET_SIZE = 19
 FINAL_PACKET_INDEX = 255
 BLE_DISCOVERY_TIMEOUT_SECONDS = 20.0
 BLE_CONNECT_TIMEOUT_SECONDS = 15.0
-BLE_REQUEST_TIMEOUT_SECONDS = 30.0
+# The meter answers within ~3 s or not at all on that connection, so fail fast
+# and spend the time on a fresh reconnect rather than waiting out a dead request.
+BLE_REQUEST_TIMEOUT_SECONDS = 8.0
 BLE_CONSUMPTION_REQUEST_TIMEOUT_SECONDS = 5.0
+# Settle delay before each packet write; sending a multi-packet payload as fast
+# as the GATT stack allows appears to overwhelm the meter.
+BLE_INTER_PACKET_DELAY_SECONDS = 0.1
 
 SERVICE_ID_HAN_MANAGEMENT = 11
 SERVICE_ID_BBSERVER = 1
@@ -82,8 +87,16 @@ OVERRIDE_TYPE_ADVANCE = 2
 DEFAULT_TIMEZONE_ID = 2
 SET_OWNER_TIMEOUT_ERROR = 20001
 SET_OWNER_RETRY_LIMIT = 5
-BLE_COMMAND_RETRY_LIMIT = 2
-BLE_COMMAND_RETRY_DELAY_SECONDS = 2.0
+# Transient drops clear within one reconnect; more retries only prolong a
+# sustained drop on the serial worker.
+BLE_COMMAND_RETRY_LIMIT = 3
+# The serial worker cannot preempt an in-flight job, so cap the refresh's retries
+# to bound how long it can delay a queued user command. It is self-healing, so
+# one reconnect is enough.
+BLE_BACKGROUND_REFRESH_RETRY_LIMIT = 1
+
+# Time between requests after a failure of any kind
+BLE_COMMAND_RETRY_DELAY_SECONDS = 3.0
 BLE_NOTIFY_RECOVERY_DELAY_SECONDS = 0.25
 BLE_DEBUG_PAYLOAD_MAX_CHARS = 4000
 BLE_SESSION_IDLE_TIMEOUT_SECONDS = 30.0
@@ -415,6 +428,7 @@ class LocalBleWorker:
         priority: LocalBlePriority | int = LocalBlePriority.USER_READ,
         coalesce_key: str | None = None,
         consumption_timeout: float = BLE_CONSUMPTION_REQUEST_TIMEOUT_SECONDS,
+        retry_limit: int = BLE_COMMAND_RETRY_LIMIT,
     ) -> LocalBleSnapshot:
         """Queue and execute one local BLE snapshot read operation."""
 
@@ -422,7 +436,7 @@ class LocalBleWorker:
             """Execute one queued local BLE snapshot read operation."""
 
             last_error: LocalBleCommissioningError | None = None
-            for attempt in range(BLE_COMMAND_RETRY_LIMIT + 1):
+            for attempt in range(retry_limit + 1):
                 attempt_started = time.monotonic()
                 try:
                     result = await self._async_read_local_snapshot_once(
@@ -431,7 +445,7 @@ class LocalBleWorker:
                     _LOGGER.debug(
                         "BLE snapshot read attempt %s/%s succeeded in %.1f ms",
                         attempt + 1,
-                        BLE_COMMAND_RETRY_LIMIT + 1,
+                        retry_limit + 1,
                         (time.monotonic() - attempt_started) * 1000,
                     )
                     return result
@@ -442,15 +456,15 @@ class LocalBleWorker:
                     _LOGGER.debug(
                         "BLE snapshot read attempt %s/%s failed in %.1f ms: %s",
                         attempt + 1,
-                        BLE_COMMAND_RETRY_LIMIT + 1,
+                        retry_limit + 1,
                         (time.monotonic() - attempt_started) * 1000,
                         error,
                     )
-                    if attempt < BLE_COMMAND_RETRY_LIMIT:
+                    if attempt < retry_limit:
                         _LOGGER.warning(
                             "BLE snapshot read failed (attempt %s/%s): %s, retrying",
                             attempt + 1,
-                            BLE_COMMAND_RETRY_LIMIT + 1,
+                            retry_limit + 1,
                             error,
                         )
                         await asyncio.sleep(BLE_COMMAND_RETRY_DELAY_SECONDS)
@@ -1361,6 +1375,8 @@ class _BleUartRpcClient:
         )
 
         for packet in packets:
+            # Pace and acknowledge each packet so a payload does not flood the meter.
+            await asyncio.sleep(BLE_INTER_PACKET_DELAY_SECONDS)
             try:
                 await self._client.write_gatt_char(UART_RX_UUID, packet, response=True)
             except (BleakError, RuntimeError, OSError) as error:
