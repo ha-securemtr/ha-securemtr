@@ -1019,7 +1019,13 @@ class LocalBleWorker:
         return snapshot
 
     def _ordered_consumption_args_candidates(self) -> list[list[int]]:
-        """Return consumption selector candidates ordered by recent success."""
+        """Return consumption selector candidates ordered by recent success.
+
+        The selector picks which DynamicTariff record to read. That service is
+        not enumerated by GetAllServiceValues, so its id cannot be resolved and
+        we just probe small values; the meter answers either 0 or 1 with an
+        equivalent profile, so order is only last-known-good first.
+        """
 
         return [[0], [1]] if self._preferred_consumption_args == (0,) else [[1], [0]]
 
