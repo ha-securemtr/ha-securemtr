@@ -123,12 +123,15 @@ When **receiving**:
 
 Immediately after notifications are enabled (and before any JSON-RPC), the client performs a
 challenge/response that proves both sides hold the shared 16-byte BLE key and arms
-transport encryption. The **JSON length-prefix / zero-pad / AES path (§4) is bypassed**
-during the handshake — but the bytes are still sent as ordinary **packets** (§3): each
-frame is wrapped with the packet index byte and terminated by the `0xFF` packet, exactly
-like any other message. Outbound frames are exactly 20 bytes; inbound frames are parsed by
-their header, not assumed to be 20 (a 4-byte header then `header[2]` value bytes).
-Each frame: `[type, ack, valueLen, 0x00] + value(16)`.
+transport encryption. The handshake **frame** is 20 bytes:
+`[type, ack, valueLen, 0x00] + value(16)`.
+
+Each frame travels the **normal transport** (§3/§4): it is carried with the same **2-byte
+length prefix** and packetized, so the framed payload is **22 bytes** (2-byte prefix +
+20-byte frame). It is **NOT AES-encrypted** — the session key is not armed until the
+handshake succeeds. (The prefix value is not meaningful for these binary frames; the
+receiver simply strips the 2 prefix bytes before parsing the frame header. Observed on a
+real device as `framed_len=22, payload_len=20`.)
 
 | Pass | Dir | Bytes |
 |---|---|---|
@@ -142,6 +145,8 @@ Each frame: `[type, ack, valueLen, 0x00] + value(16)`.
   now armed for all subsequent RPC traffic. Mismatch ⇒ key error, disconnect.
 - **ACK / error bytes:** `0x00` = success, `0x01` = invalid message format, `0x02` = key
   mismatch. A frame of **type `0x05`** is an explicit rejection.
+- **Receive:** strip the 2-byte length prefix, then parse the 20-byte frame by its header
+  (`type, ack, valueLen` then `valueLen` value bytes) — do not assume a fixed 20-byte read.
 - Nonces are 16 bytes; the header length byte `0x10` = 16.
 
 ---

@@ -1030,6 +1030,16 @@ class BeanbagBackend:
         on_minutes.sort()
         off_minutes.sort()
 
+        # Spec §11.4: up to 3 ON + 3 OFF transitions per day.
+        if len(on_minutes) > 3:
+            raise BeanbagWebSocketError(
+                "Beanbag weekly program reported more than three on transitions"
+            )
+        if len(off_minutes) > 3:
+            raise BeanbagWebSocketError(
+                "Beanbag weekly program reported more than three off transitions"
+            )
+
         padded_on = tuple(on_minutes + [None] * (3 - len(on_minutes)))
         padded_off = tuple(off_minutes + [None] * (3 - len(off_minutes)))
 

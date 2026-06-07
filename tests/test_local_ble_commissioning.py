@@ -16,10 +16,14 @@ if str(PROJECT_ROOT) not in sys.path:
 
 from custom_components.securemtr.local_ble_commissioning import (
     FINAL_PACKET_INDEX,
+    UART_RX_UUID,
+    UART_TX_UUID,
     LocalBleSnapshot,
     LocalBleWorker,
     _BleUartRpcClient,
     LocalBleCommissioningError,
+    _aes_ecb_decrypt,
+    _aes_ecb_encrypt,
     _async_commission_over_rpc,
     _async_disconnect_client,
     _async_read_ble_snapshot_once,
@@ -27,6 +31,7 @@ from custom_components.securemtr.local_ble_commissioning import (
     _async_resolve_mode_and_hot_water_service_bois,
     _async_set_owner_with_retry,
     _command_to_rpc_payload,
+    _find_primary_service,
     _parse_consumption_day_rows,
     _parse_consumption_state,
     _parse_local_weekly_program,
@@ -106,11 +111,161 @@ def test_command_to_rpc_payload_rejects_unknown_command() -> None:
         )
 
 
+def test_command_to_rpc_payload_turn_on_targets_resolved_primary_service() -> None:
+    """Ensure on/off writes target the resolved primary service id (spec §12.2)."""
+
+    handler_id, service_id, args = _command_to_rpc_payload(
+        "turn_controller_on",
+        {},
+        mode_service_id=33,
+        mode_service_boi=7,
+        hot_water_service_boi=2,
+    )
+
+    assert handler_id == 2
+    assert service_id == 33
+    assert args == [7, {"I": 6, "V": 2}]
+
+
+def test_command_to_rpc_payload_turn_off_defaults_to_thermostat_service() -> None:
+    """Ensure on/off writes fall back to Thermostat (15) when SI is unspecified."""
+
+    handler_id, service_id, args = _command_to_rpc_payload(
+        "turn_controller_off",
+        {},
+        mode_service_boi=1,
+        hot_water_service_boi=2,
+    )
+
+    assert handler_id == 2
+    assert service_id == 15
+    assert args == [1, {"I": 6, "V": 0}]
+
+
+def test_find_primary_service_prefers_timer_channel() -> None:
+    """Ensure the primary channel resolves Timer (33) per spec §13.3."""
+
+    response = {
+        "V": [
+            {"SI": 33, "I": 7, "V": []},
+            {"SI": 16, "I": 9, "V": []},
+        ]
+    }
+
+    assert _find_primary_service(response) == (33, 7)
+
+
+@pytest.mark.asyncio
+async def test_async_resolve_mode_and_hot_water_service_bois_resolves_timer() -> None:
+    """Ensure the async resolver surfaces the Timer (33) primary service id."""
+
+    class FakeRpcClient:
+        async def async_rpc_request(self, **kwargs: Any) -> Any:
+            return {
+                "V": [
+                    {"SI": 33, "I": 5, "V": []},
+                    {"SI": 16, "I": 8, "V": []},
+                ]
+            }
+
+    mode_service_id, mode_boi, hot_water_boi = (
+        await _async_resolve_mode_and_hot_water_service_bois(
+            FakeRpcClient(),
+            gateway_mac_id="12345",
+        )
+    )
+
+    assert mode_service_id == 33
+    assert mode_boi == 5
+    assert hot_water_boi == 8
+
+
 def test_java_utf8_character_length_mimics_java_decode() -> None:
-    """Ensure UTF-8 character length follows Java replacement behavior."""
+    """Ensure UTF-16 code-unit length follows Java String.length() behavior."""
 
     assert _java_utf8_character_length(b"abc") == 3
     assert _java_utf8_character_length(b"\xff") == 1
+    # Astral code points (e.g. U+1F600) count as 2 UTF-16 code units in Java.
+    assert _java_utf8_character_length("\U0001f600".encode("utf-8")) == 2
+
+
+@pytest.mark.asyncio
+async def test_async_authorize_completes_length_prefixed_four_pass_handshake() -> None:
+    """Ensure the 4-pass handshake uses length-prefixed, un-encrypted frames.
+
+    The device carries handshake frames with the same 2-byte length prefix as
+    any other message (framed = 22 bytes for a 20-byte frame) but without AES,
+    as observed on a real device (framed_len=22, payload_len=20).
+    """
+
+    key = bytes.fromhex("00112233445566778899aabbccddeeff")
+    meter_random = bytes(range(16))
+
+    class FakeDevice:
+        """Emulate the device's length-prefixed, un-encrypted handshake."""
+
+        def __init__(self) -> None:
+            self._notify_callback: Any | None = None
+            self._inbound: dict[int, bytes] = {}
+            self.framed_received: list[bytes] = []
+
+        async def start_notify(self, _uuid: Any, callback: Any) -> None:
+            self._notify_callback = callback
+
+        async def stop_notify(self, _uuid: Any) -> None:
+            return None
+
+        async def write_gatt_char(
+            self, _uuid: Any, packet: bytes, *, response: bool
+        ) -> None:
+            assert response is True
+            index = packet[0]
+            self._inbound[index] = packet[1:]
+            if index != FINAL_PACKET_INDEX:
+                return
+
+            framed = b"".join(self._inbound[i] for i in sorted(self._inbound))
+            self._inbound.clear()
+            self.framed_received.append(framed)
+            # Strip the leading 2-byte length prefix to recover the frame.
+            self._respond(framed[2:])
+
+        def _respond(self, frame: bytes) -> None:
+            frame_type = frame[0]
+            value = frame[4:20]
+            if frame_type == 1:
+                response = bytes([2, 0, 16, 0]) + meter_random
+            elif frame_type == 3:
+                assert _aes_ecb_decrypt(key, value) == meter_random
+                response = bytes([4, 0, 16, 0]) + _aes_ecb_encrypt(
+                    key, self._app_random
+                )
+            else:  # pragma: no cover - defensive
+                raise AssertionError(f"unexpected handshake frame type {frame_type}")
+            self._deliver(response)
+
+        @property
+        def _app_random(self) -> bytes:
+            # appRandom is whatever the client sent in pass 1 (after the prefix).
+            return self.framed_received[0][6:22]
+
+        def _deliver(self, frame: bytes) -> None:
+            assert self._notify_callback is not None
+            # The device prepends a correct 2-byte length prefix to its responses.
+            framed = len(frame).to_bytes(2, byteorder="big") + frame
+            for packet in _packetize_payload(framed):
+                self._notify_callback(None, bytearray(packet))
+
+    device = FakeDevice()
+    rpc_client = _BleUartRpcClient(device)
+    await rpc_client.async_initialize()
+    await rpc_client.async_authorize(key)
+
+    # Two outbound frames (pass 1, pass 3): each framed = 2-byte prefix + 20-byte
+    # un-encrypted handshake frame = 22 bytes, with the frame header after the prefix.
+    assert [len(framed) for framed in device.framed_received] == [22, 22]
+    assert device.framed_received[0][2:6] == bytes([1, 0, 16, 0])
+    assert device.framed_received[1][2:6] == bytes([3, 0, 16, 0])
 
 
 @pytest.mark.asyncio
@@ -121,11 +276,14 @@ async def test_async_resolve_mode_and_hot_water_service_bois_parses_value_field(
         async def async_rpc_request(self, **kwargs: Any) -> Any:
             return {"V": [{"value": 15, "I": 11}, {"value": 16, "I": 22}]}
 
-    mode_boi, hot_water_boi = await _async_resolve_mode_and_hot_water_service_bois(
-        FakeRpcClient(),
-        gateway_mac_id="12345",
+    mode_service_id, mode_boi, hot_water_boi = (
+        await _async_resolve_mode_and_hot_water_service_bois(
+            FakeRpcClient(),
+            gateway_mac_id="12345",
+        )
     )
 
+    assert mode_service_id == 15
     assert mode_boi == 11
     assert hot_water_boi == 22
 

@@ -65,6 +65,14 @@ SERVICE_ID_MODE_LEGACY = 13
 SERVICE_ID_HOT_WATER = 16
 SERVICE_ID_PRIMARY_STATE = 33
 SERVICE_ID_DYNAMIC_TARIFF = 36
+# Per spec §9.1/§13.3 the primary heating/timer channel is the first instance
+# whose SI is in this set; on the E7 Plus it is Timer (33), with Thermostat (15)
+# and legacy Mode (13) as fallbacks on older firmware.
+SERVICE_ID_PRIMARY_CANDIDATES = (
+    SERVICE_ID_PRIMARY_STATE,
+    SERVICE_ID_MODE,
+    SERVICE_ID_MODE_LEGACY,
+)
 HANDLER_WRITE_DATA = 2
 HANDLER_SET_TIME = 2
 HANDLER_GET_ALL_SERVICE_VALUES = 3
@@ -314,7 +322,7 @@ class LocalBleWorker:
 
         self._client: Any | None = None
         self._rpc_client: _BleUartRpcClient | None = None
-        self._mode_hot_water_service_bois: tuple[int, int] | None = None
+        self._mode_hot_water_service_bois: tuple[int, int, int] | None = None
         self._schedule_zone_bois: dict[str, int] | None = None
         self._preferred_consumption_args: tuple[int, ...] | None = None
 
@@ -952,8 +960,8 @@ class LocalBleWorker:
     async def _async_resolve_mode_and_hot_water_service_bois_cached(
         self,
         rpc_client: _BleUartRpcClient,
-    ) -> tuple[int, int]:
-        """Return mode and hot-water BOIs using a reconnect-aware cache."""
+    ) -> tuple[int, int, int]:
+        """Return primary service id/BOI and hot-water BOI using a cache."""
 
         if self._mode_hot_water_service_bois is not None:
             return self._mode_hot_water_service_bois
@@ -974,12 +982,13 @@ class LocalBleWorker:
         """Execute one local BLE command with the active reusable session."""
 
         rpc_client = await self._async_ensure_rpc_client()
-        mode_service_boi, hot_water_service_boi = (
+        mode_service_id, mode_service_boi, hot_water_service_boi = (
             await self._async_resolve_mode_and_hot_water_service_bois_cached(rpc_client)
         )
         handler_id, service_id, args = _command_to_rpc_payload(
             method_name,
             operation_kwargs,
+            mode_service_id=mode_service_id,
             mode_service_boi=mode_service_boi,
             hot_water_service_boi=hot_water_service_boi,
         )
@@ -1286,6 +1295,11 @@ class _BleUartRpcClient:
         if len(auth_key) != 16:
             raise LocalBleCommissioningError("BLE key must decode to 16 bytes")
 
+        # The 4-pass handshake is carried with the same 2-byte length prefix as
+        # any other message but is NOT AES-encrypted (the key is not armed yet),
+        # so use the normal framed path with the prefix and no encryption. The
+        # device returns length-prefixed frames; the prefix is stripped before
+        # _parse_four_pass_response reads the frame header.
         app_random = secrets.token_bytes(16)
         pass1_request = bytes([1, 0, 16, 0]) + app_random
         pass2_response = await self._async_exchange_bytes(
@@ -1358,7 +1372,12 @@ class _BleUartRpcClient:
         *,
         use_java_utf8_length: bool,
     ) -> None:
-        """Frame and transmit one BLE payload."""
+        """Frame and transmit one BLE payload.
+
+        The frame is the 2-byte length prefix + payload; it is AES-encrypted only
+        once the session key is armed. The un-encrypted 4-pass handshake frames
+        therefore travel this same path with the prefix but no encryption.
+        """
 
         self._reset_response_state()
 
@@ -1368,7 +1387,8 @@ class _BleUartRpcClient:
             else len(request_payload)
         )
         framed_request = payload_length.to_bytes(2, byteorder="big") + request_payload
-        if self._auth_key is not None:
+        encrypted = self._auth_key is not None
+        if encrypted:
             framed_request = _encrypt_payload(self._auth_key, framed_request)
 
         packets = _packetize_payload(framed_request)
@@ -1377,7 +1397,7 @@ class _BleUartRpcClient:
             len(request_payload),
             len(framed_request),
             len(packets),
-            self._auth_key is not None,
+            encrypted,
         )
 
         for packet in packets:
@@ -1397,7 +1417,13 @@ class _BleUartRpcClient:
         self._response_event.clear()
 
     async def _async_wait_for_response_payload(self, *, timeout: float) -> bytes:
-        """Wait for one BLE response payload and decode transport framing."""
+        """Wait for one BLE response payload and decode transport framing.
+
+        Reassembled bytes are AES-decrypted only when the session key is armed,
+        then the 2-byte length prefix is stripped. Un-encrypted 4-pass handshake
+        responses travel this same path: the prefix is stripped before the frame
+        header is parsed.
+        """
 
         wait_started = time.monotonic()
         try:
@@ -1477,9 +1503,15 @@ def _extract_length_prefixed_payload(payload: bytes) -> bytes:
 
 
 def _java_utf8_character_length(payload: bytes) -> int:
-    """Return the UTF-8 decoded character length matching Java String behavior."""
+    """Return the UTF-16 code-unit count matching Java ``String.length()``.
 
-    return len(payload.decode("utf-8", errors="replace"))
+    Spec §4 defines the 2-byte frame length prefix as the count of UTF-16 code
+    units in the JSON string, so non-BMP code points count as 2 (a surrogate
+    pair). For pure-ASCII JSON (the normal case) this equals the byte count.
+    """
+
+    decoded = payload.decode("utf-8", errors="replace")
+    return sum(2 if ord(char) > 0xFFFF else 1 for char in decoded)
 
 
 def _pad_zero(data: bytes) -> bytes:
@@ -1671,7 +1703,7 @@ def _validate_advertisement_identity(
         _LOGGER.debug("Raw advertisement bytes unavailable for %s", expected_address)
         return
 
-    if len(raw_scan_record) <= 30:
+    if len(raw_scan_record) <= 21:
         _LOGGER.debug(
             "Raw advertisement bytes shorter than expected for protocol validation"
         )
@@ -2148,14 +2180,28 @@ def _coerce_schedule_zone_bois(
     return zone_bois
 
 
+def _find_primary_service(response: Any) -> tuple[int | None, int | None]:
+    """Resolve the primary heating/timer service (SI, BOI) from service values.
+
+    Per spec §9.1/§13.3 the primary channel is the first instance whose SI is in
+    {33, 15, 13}; on the E7 Plus it is Timer (33).
+    """
+
+    for service_entry in _extract_service_values(response):
+        service_id = _extract_service_identifier(service_entry)
+        if service_id in SERVICE_ID_PRIMARY_CANDIDATES:
+            boi = _extract_service_boi(service_entry)
+            if boi is not None:
+                return service_id, boi
+    return None, None
+
+
 def _resolve_mode_and_hot_water_service_bois(
     response: Any,
 ) -> tuple[int | None, int | None]:
     """Resolve mode-service and hot-water-service BOIs from service values."""
 
-    mode_boi = _find_service_boi(response, service_id=SERVICE_ID_MODE)
-    if mode_boi is None:
-        mode_boi = _find_service_boi(response, service_id=SERVICE_ID_MODE_LEGACY)
+    _primary_service_id, mode_boi = _find_primary_service(response)
 
     hot_water_boi = _find_service_boi(response, service_id=SERVICE_ID_HOT_WATER)
     return mode_boi, hot_water_boi
@@ -2536,6 +2582,7 @@ def _command_to_rpc_payload(
     *,
     mode_service_boi: int,
     hot_water_service_boi: int,
+    mode_service_id: int = SERVICE_ID_MODE,
 ) -> tuple[int, int, list[Any] | None]:
     """Translate a local command method name to RPC header and arguments."""
 
@@ -2569,14 +2616,14 @@ def _command_to_rpc_payload(
     if method_name == "turn_controller_on":
         return (
             HANDLER_WRITE_DATA,
-            SERVICE_ID_MODE,
+            mode_service_id,
             [mode_service_boi, {"I": 6, "V": 2}],
         )
 
     if method_name == "turn_controller_off":
         return (
             HANDLER_WRITE_DATA,
-            SERVICE_ID_MODE,
+            mode_service_id,
             [mode_service_boi, {"I": 6, "V": 0}],
         )
 
@@ -2589,18 +2636,32 @@ async def _async_resolve_mode_and_hot_water_service_bois(
     rpc_client: _BleUartRpcClient,
     *,
     gateway_mac_id: str,
-) -> tuple[int, int]:
-    """Resolve mode-service and hot-water-service BOIs with defaults."""
+) -> tuple[int, int, int]:
+    """Resolve the primary service id/BOI and hot-water BOI with defaults.
+
+    Returns ``(mode_service_id, mode_service_boi, hot_water_service_boi)``. The
+    primary (mode) service id is whichever of {33, 15, 13} the device exposes so
+    that on/off writes target the correct service (spec §12.2/§13.3); it falls
+    back to Thermostat (15) only when no primary instance is present.
+    """
 
     response = await _async_get_all_service_values(
         rpc_client,
         gateway_mac_id=gateway_mac_id,
     )
 
-    resolved_mode_service_boi, resolved_hot_water_service_boi = (
-        _resolve_mode_and_hot_water_service_bois(response)
+    resolved_mode_service_id, resolved_mode_service_boi = _find_primary_service(
+        response
+    )
+    resolved_hot_water_service_boi = _find_service_boi(
+        response, service_id=SERVICE_ID_HOT_WATER
     )
 
+    mode_service_id = (
+        resolved_mode_service_id
+        if resolved_mode_service_id is not None
+        else SERVICE_ID_MODE
+    )
     mode_service_boi = (
         resolved_mode_service_boi if resolved_mode_service_boi is not None else 1
     )
@@ -2608,7 +2669,7 @@ async def _async_resolve_mode_and_hot_water_service_bois(
         resolved_hot_water_service_boi if resolved_hot_water_service_boi is not None else 2
     )
 
-    return mode_service_boi, hot_water_service_boi
+    return mode_service_id, mode_service_boi, hot_water_service_boi
 
 
 async def async_read_local_snapshot(
@@ -3265,7 +3326,7 @@ async def _async_execute_ble_rpc_command(
         await rpc_client.async_initialize()
         if auth_key is not None:
             await rpc_client.async_authorize(auth_key)
-        mode_service_boi, hot_water_service_boi = (
+        mode_service_id, mode_service_boi, hot_water_service_boi = (
             await _async_resolve_mode_and_hot_water_service_bois(
                 rpc_client,
                 gateway_mac_id=gateway_mac_id,
@@ -3274,6 +3335,7 @@ async def _async_execute_ble_rpc_command(
         handler_id, service_id, args = _command_to_rpc_payload(
             method_name,
             operation_kwargs,
+            mode_service_id=mode_service_id,
             mode_service_boi=mode_service_boi,
             hot_water_service_boi=hot_water_service_boi,
         )
