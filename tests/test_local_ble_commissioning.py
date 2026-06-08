@@ -1621,3 +1621,74 @@ async def test_async_execute_local_command_orchestrates_auth_and_rpc(
     assert instance.requests[1]["service_id"] == 16
     assert instance.requests[1]["args"] == [22, {"D": 30, "I": 4, "OT": 2, "V": 0}]
     disconnect.assert_awaited_once_with(fake_client)
+
+
+@pytest.mark.asyncio
+async def test_async_close_skips_unsubscribe_when_notifications_never_started() -> None:
+    """async_close must not call stop_notify if subscription never succeeded."""
+
+    from unittest.mock import AsyncMock
+
+    client = SimpleNamespace(stop_notify=AsyncMock())
+    rpc_client = _BleUartRpcClient(client)
+
+    await rpc_client.async_close()
+
+    client.stop_notify.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_async_close_unsubscribes_when_notifications_started() -> None:
+    """async_close stops notifications when they were successfully started."""
+
+    from unittest.mock import AsyncMock
+
+    client = SimpleNamespace(stop_notify=AsyncMock())
+    rpc_client = _BleUartRpcClient(client)
+    rpc_client._notifications_started = True
+
+    await rpc_client.async_close()
+
+    client.stop_notify.assert_awaited_once()
+    assert rpc_client._notifications_started is False
+
+
+class _ServicesMissingUart:
+    """Service collection that resolves no UART service."""
+
+    def get_service(self, _uuid: Any) -> Any:
+        return None
+
+
+@pytest.mark.asyncio
+async def test_async_initialize_clears_cache_when_uart_service_missing() -> None:
+    """A missing UART service clears the GATT cache and raises, forcing rediscovery."""
+
+    from unittest.mock import AsyncMock
+
+    client = SimpleNamespace(
+        services=_ServicesMissingUart(),
+        clear_cache=AsyncMock(),
+        start_notify=AsyncMock(),
+    )
+    rpc_client = _BleUartRpcClient(client)
+
+    with pytest.raises(
+        LocalBleCommissioningError, match="UART service was not found"
+    ):
+        await rpc_client.async_initialize()
+
+    client.clear_cache.assert_awaited_once()
+    # The TX subscription must not be attempted when the service is missing.
+    client.start_notify.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_async_initialize_missing_service_without_clear_cache() -> None:
+    """A client without clear_cache still raises cleanly (no crash)."""
+
+    client = SimpleNamespace(services=_ServicesMissingUart())
+    rpc_client = _BleUartRpcClient(client)
+
+    with pytest.raises(LocalBleCommissioningError):
+        await rpc_client.async_initialize()

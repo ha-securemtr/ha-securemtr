@@ -32,9 +32,13 @@ except ImportError:  # pragma: no cover - depends on runtime environment
 
 
 try:  # pragma: no cover - depends on runtime environment
-    from bleak_retry_connector import establish_connection
+    from bleak_retry_connector import (
+        BleakClientWithServiceCache,
+        establish_connection,
+    )
 except ImportError:  # pragma: no cover - depends on runtime environment
     establish_connection = None
+    BleakClientWithServiceCache = None
 
 
 _LOGGER = logging.getLogger(__name__)
@@ -1097,6 +1101,23 @@ class _BleUartRpcClient:
         self._response_packets: dict[int, bytes] = {}
         self._response_event = asyncio.Event()
         self._auth_key: bytes | None = None
+        self._notifications_started = False
+
+    async def _async_clear_service_cache(self) -> None:
+        """Drop a stale/partial cached GATT database so the next connect rediscovers.
+
+        A connected device whose discovered services lack the UART profile usually
+        reflects a stale or partial cached GATT database; clearing it forces a fresh
+        discovery on the next reconnect. Best-effort and a no-op if the client has
+        no cache.
+        """
+
+        clear_cache = getattr(self._client, "clear_cache", None)
+        if not callable(clear_cache):
+            return
+        _LOGGER.debug("Clearing cached GATT database after UART profile was not found")
+        with suppress(Exception):
+            await clear_cache()
 
     async def async_initialize(self) -> None:
         """Validate service characteristics and subscribe to TX notifications."""
@@ -1105,18 +1126,22 @@ class _BleUartRpcClient:
         if services is not None:
             service = services.get_service(UART_SERVICE_UUID)
             if service is None:
+                await self._async_clear_service_cache()
                 raise LocalBleCommissioningError("SecureMTR UART service was not found")
             if service.get_characteristic(UART_RX_UUID) is None:
+                await self._async_clear_service_cache()
                 raise LocalBleCommissioningError(
                     "SecureMTR UART RX characteristic missing"
                 )
             if service.get_characteristic(UART_TX_UUID) is None:
+                await self._async_clear_service_cache()
                 raise LocalBleCommissioningError(
                     "SecureMTR UART TX characteristic missing"
                 )
 
         try:
             await self._client.start_notify(UART_TX_UUID, self._notification_callback)
+            self._notifications_started = True
         except (BleakError, RuntimeError, OSError, EOFError) as error:
             if _is_notify_already_acquired_error(error):
                 _LOGGER.debug(
@@ -1130,6 +1155,7 @@ class _BleUartRpcClient:
                         UART_TX_UUID,
                         self._notification_callback,
                     )
+                    self._notifications_started = True
                     return
                 except (BleakError, RuntimeError, OSError, EOFError) as retry_error:
                     raise LocalBleCommissioningError(
@@ -1143,6 +1169,12 @@ class _BleUartRpcClient:
     async def async_close(self) -> None:
         """Stop notifications when possible."""
 
+        # Only attempt to unsubscribe if we actually subscribed; otherwise the TX
+        # characteristic may never have been discovered (e.g. the UART service was
+        # missing), and stop_notify would raise a misleading error.
+        if not self._notifications_started:
+            return
+
         try:
             await self._client.stop_notify(UART_TX_UUID)
         except (BleakError, RuntimeError, OSError, EOFError) as error:
@@ -1150,6 +1182,8 @@ class _BleUartRpcClient:
                 _LOGGER.debug("TX notifications already unavailable while closing")
             else:
                 _LOGGER.debug("Unable to stop TX notifications", exc_info=True)
+        finally:
+            self._notifications_started = False
 
     async def async_rpc_request(
         self,
@@ -1800,9 +1834,13 @@ async def _async_connect_client(
         raise LocalBleCommissioningError("Bleak is not available in this environment")
 
     if establish_connection is not None:
+        # Prefer the cache-aware client so a stale/partial BlueZ GATT cache can be
+        # cleared and rediscovered when the UART service is missing (see
+        # _async_ensure_rpc_client); fall back to the plain client otherwise.
+        client_class = BleakClientWithServiceCache or BleakClient
         try:
             return await establish_connection(
-                BleakClient,
+                client_class,
                 ble_device,
                 ble_device.address,
                 max_attempts=4,
