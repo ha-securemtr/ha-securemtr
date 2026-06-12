@@ -2,18 +2,82 @@
   "title": "SecureMTR",
   "config": {
     "error": {
-      "password_too_long": "The Secure Controls mobile app only accepts passwords up to 12 characters."
+      "password_required": "Enter your Secure Controls password.",
+      "password_too_long": "The Secure Controls mobile app only accepts passwords up to 12 characters.",
+      "invalid_email": "Enter a valid email address.",
+      "invalid_serial": "Enter an 8-character controller serial number.",
+      "invalid_mac": "Enter a valid MAC address (12 hex characters, with or without colons).",
+      "invalid_device_type": "Only E7+ is currently supported for local BLE setup.",
+      "commissioning_not_started": "Tick the commissioning checkbox after putting the controller into pairing mode.",
+      "commissioning_failed": "Could not complete local BLE commissioning. Confirm the controller is in commissioning mode and retry.",
+      "commissioning_invalid_result": "Commissioning completed but did not return a usable BLE key."
     },
     "abort": {
-      "already_configured": "SecureMTR is already configured."
+      "already_configured": "SecureMTR is already configured.",
+      "reconfigure_successful": "SecureMTR settings were updated.",
+      "reconfigure_failed": "SecureMTR could not load pending reconfigure data."
     },
     "step": {
       "user": {
+        "title": "Connection method",
+        "description": "Choose how Home Assistant should connect to your SecureMTR controller.",
+        "data": {
+          "connection_mode": "Connection mode"
+        }
+      },
+      "cloud": {
         "title": "Secure Controls account",
         "description": "Enter the username (email address) and password that you use with the Secure Controls mobile app.",
         "data": {
           "email": "Email address (username)",
           "password": "Password"
+        }
+      },
+      "local_ble": {
+        "title": "Local BLE onboarding",
+        "description": "Enter your controller details exactly as shown on the device label.",
+        "data": {
+          "serial_number": "Serial number",
+          "mac_address": "MAC address",
+          "device_type": "Device type"
+        }
+      },
+      "local_ble_commissioning": {
+        "title": "Start controller commissioning",
+        "description": "Put the E7+ controller into commissioning mode now, then tick the checkbox to start BLE commissioning for serial {serial_number} ({mac_address}).",
+        "data": {
+          "start_commissioning": "Controller is in commissioning mode"
+        }
+      },
+      "reconfigure": {
+        "title": "Reconfigure connection",
+        "description": "Choose how this SecureMTR entry should connect.",
+        "data": {
+          "connection_mode": "Connection mode"
+        }
+      },
+      "reconfigure_cloud": {
+        "title": "Update Secure Controls account",
+        "description": "Enter the cloud account credentials for this existing entry.",
+        "data": {
+          "email": "Email address (username)",
+          "password": "Password"
+        }
+      },
+      "reconfigure_local_ble": {
+        "title": "Update local BLE details",
+        "description": "Enter the E7+ serial number and MAC address for this entry.",
+        "data": {
+          "serial_number": "Serial number",
+          "mac_address": "MAC address",
+          "device_type": "Device type"
+        }
+      },
+      "reconfigure_local_ble_commissioning": {
+        "title": "Recommission local BLE",
+        "description": "Put the E7+ controller into commissioning mode now, then tick the checkbox to recommission serial {serial_number} ({mac_address}).",
+        "data": {
+          "start_commissioning": "Controller is in commissioning mode"
         }
       }
     }
@@ -60,6 +124,12 @@
       },
       "boost_scheduled_daily": {
         "name": "Boost scheduled (last day)"
+      },
+      "primary_weekly_schedule": {
+        "name": "Primary weekly schedule"
+      },
+      "boost_weekly_schedule": {
+        "name": "Boost weekly schedule"
       }
     },
     "switch": {
@@ -111,6 +181,48 @@
         "zone": {
           "name": "Zone",
           "description": "SecureMTR zone to reset. Defaults to the primary zone."
+        }
+      }
+    },
+    "start_timed_boost": {
+      "name": "Start timed boost",
+      "description": "Start a timed boost run for an arbitrary number of minutes.",
+      "fields": {
+        "entry_id": {
+          "name": "Entry ID",
+          "description": "Config entry ID of the SecureMTR controller to control."
+        },
+        "duration_minutes": {
+          "name": "Duration (minutes)",
+          "description": "Boost duration in minutes (1-1440)."
+        }
+      }
+    },
+    "set_primary_weekly_schedule": {
+      "name": "Set primary weekly schedule",
+      "description": "Update the primary zone weekly schedule using 15-minute aligned transitions.",
+      "fields": {
+        "entry_id": {
+          "name": "Entry ID",
+          "description": "Config entry ID of the SecureMTR controller to control."
+        },
+        "schedule": {
+          "name": "Weekly schedule payload",
+          "description": "Mapping for monday..sunday where each day contains on/off HH:MM lists."
+        }
+      }
+    },
+    "set_boost_weekly_schedule": {
+      "name": "Set boost weekly schedule",
+      "description": "Update the boost zone weekly schedule using 15-minute aligned transitions.",
+      "fields": {
+        "entry_id": {
+          "name": "Entry ID",
+          "description": "Config entry ID of the SecureMTR controller to control."
+        },
+        "schedule": {
+          "name": "Weekly schedule payload",
+          "description": "Mapping for monday..sunday where each day contains on/off HH:MM lists."
         }
       }
     }

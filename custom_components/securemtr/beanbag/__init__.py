@@ -43,6 +43,9 @@ TRANSITIONS_PER_DAY = 6
 SENTINEL_MINUTE = 65535
 SENTINEL_TYPE = 255
 
+PRIMARY_SERVICE_CANDIDATES = (33, 15, 13)
+OVERRIDE_TYPE_ADVANCE = 2
+
 
 class BeanbagError(RuntimeError):
     """Base exception for Beanbag backend issues."""
@@ -802,7 +805,7 @@ class BeanbagBackend:
         for block in blocks:
             if not isinstance(block, dict):
                 continue
-            if block.get("SI") != 33:
+            if block.get("SI") not in PRIMARY_SERVICE_CANDIDATES:
                 continue
 
             items = block.get("V")
@@ -855,11 +858,7 @@ class BeanbagBackend:
             if item.get("I") != 4:
                 continue
 
-            value = item.get("V")
-            if value == 1:
-                return True
-            if value == 0:
-                return False
+            return item.get("OT") == OVERRIDE_TYPE_ADVANCE
 
         return None
 
@@ -876,7 +875,7 @@ class BeanbagBackend:
                 continue
 
             value = item.get("V")
-            if isinstance(value, int) and value >= 0:
+            if isinstance(value, int) and 0 <= value < MINUTES_PER_DAY:
                 return value
 
         return None
@@ -1019,16 +1018,8 @@ class BeanbagBackend:
                 )
 
             if state == 1:
-                if len(on_minutes) >= 3:
-                    raise BeanbagWebSocketError(
-                        "Beanbag weekly program reported more than 3 on transitions"
-                    )
                 on_minutes.append(minute)
             elif state == 0:
-                if len(off_minutes) >= 3:
-                    raise BeanbagWebSocketError(
-                        "Beanbag weekly program reported more than 3 off transitions"
-                    )
                 off_minutes.append(minute)
             else:
                 raise BeanbagWebSocketError(
@@ -1037,6 +1028,16 @@ class BeanbagBackend:
 
         on_minutes.sort()
         off_minutes.sort()
+
+        # Spec §11.4: up to 3 ON + 3 OFF transitions per day.
+        if len(on_minutes) > 3:
+            raise BeanbagWebSocketError(
+                "Beanbag weekly program reported more than three on transitions"
+            )
+        if len(off_minutes) > 3:
+            raise BeanbagWebSocketError(
+                "Beanbag weekly program reported more than three off transitions"
+            )
 
         padded_on = tuple(on_minutes + [None] * (3 - len(on_minutes)))
         padded_off = tuple(off_minutes + [None] * (3 - len(off_minutes)))

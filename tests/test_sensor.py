@@ -16,9 +16,11 @@ from custom_components.securemtr.sensor import (
     SecuremtrDailyDurationSensor,
     SecuremtrEnergyTotalSensor,
     SecuremtrSensorEntity,
+    SecuremtrWeeklyScheduleSensor,
     async_setup_entry,
 )
 from custom_components.securemtr.zones import ZONE_METADATA, ZoneMetadata
+from custom_components.securemtr.beanbag import DailyProgram
 from homeassistant.components.sensor import SensorDeviceClass, SensorStateClass
 from homeassistant.const import UnitOfEnergy, UnitOfTime
 from homeassistant.config_entries import ConfigEntry
@@ -284,7 +286,7 @@ async def test_energy_sensors_report_totals() -> None:
 
     await async_setup_entry(hass, entry, entities.extend)
 
-    assert len(entities) == 1 + len(ZONE_METADATA) * 3
+    assert len(entities) == 3 + len(ZONE_METADATA) * 3
     sensors_by_id = {entity.unique_id: entity for entity in entities}
 
     primary_metadata = ZONE_METADATA["primary"]
@@ -408,6 +410,65 @@ async def test_energy_sensors_report_totals() -> None:
     runtime.statistics_recent = None
     assert boost_runtime.native_value is None
     assert boost_runtime.extra_state_attributes is None
+
+
+@pytest.mark.asyncio
+async def test_weekly_schedule_sensors_expose_cached_schedule() -> None:
+    """Ensure weekly schedule sensors expose transition counts and payload attributes."""
+
+    runtime = _create_runtime()
+    runtime.weekly_programs = {
+        "primary": (
+            DailyProgram((285, None, None), (465, None, None)),
+            DailyProgram((285, None, None), (465, None, None)),
+            DailyProgram((285, None, None), (465, None, None)),
+            DailyProgram((285, None, None), (465, None, None)),
+            DailyProgram((285, None, None), (465, None, None)),
+            DailyProgram((None, None, None), (None, None, None)),
+            DailyProgram((None, None, None), (None, None, None)),
+        ),
+        "boost": (
+            DailyProgram((105, None, None), (525, None, None)),
+            DailyProgram((105, None, None), (525, None, None)),
+            DailyProgram((105, None, None), (525, None, None)),
+            DailyProgram((105, None, None), (525, None, None)),
+            DailyProgram((105, None, None), (525, None, None)),
+            DailyProgram((105, None, None), (525, None, None)),
+            DailyProgram((105, None, None), (525, None, None)),
+        ),
+    }
+    runtime.weekly_canonicals = {
+        "primary": [(285, 465)],
+        "boost": [(105, 525)],
+    }
+
+    hass = SimpleNamespace(data={DOMAIN: {"entry": runtime}})
+    entry = create_config_entry(entry_id="entry")
+    entities: list[SecuremtrSensorEntity] = []
+
+    await async_setup_entry(hass, entry, entities.extend)
+
+    schedule_sensors = [
+        entity for entity in entities if isinstance(entity, SecuremtrWeeklyScheduleSensor)
+    ]
+    assert len(schedule_sensors) == 2
+
+    primary_sensor = next(
+        sensor for sensor in schedule_sensors if sensor.unique_id.endswith("primary_weekly_schedule")
+    )
+    assert primary_sensor.native_value == 10
+    primary_attributes = primary_sensor.extra_state_attributes
+    assert primary_attributes is not None
+    schedule_payload = primary_attributes["schedule"]
+    assert isinstance(schedule_payload, dict)
+    assert schedule_payload["monday"]["on"] == ["04:45"]
+    assert schedule_payload["monday"]["off"] == ["07:45"]
+
+    boost_sensor = next(
+        sensor for sensor in schedule_sensors if sensor.unique_id.endswith("boost_weekly_schedule")
+    )
+    assert boost_sensor.native_value == 14
+    assert boost_sensor.available is True
 
 
 @pytest.mark.asyncio

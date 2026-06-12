@@ -178,3 +178,56 @@ custom_components.securemtr.energy._sanitize_day_map: Return a sanitized copy of
 custom_components.securemtr.energy._entry_digest: Return a deterministic digest for the provided energy sample.
 custom_components.securemtr.energy._normalise_zone_payload: Convert stored payloads into the canonical ledger representation.
 custom_components.securemtr.energy._today: Return today's date for freeze horizon calculations.
+custom_components.securemtr.local_ble_commissioning._service_uuid_matches: Return True if UART service UUID is present in advertisement metadata.
+custom_components.securemtr.local_ble_commissioning._advertised_serial: Extract the advertised serial/name from Home Assistant service info.
+custom_components.securemtr.local_ble_commissioning._extract_raw_scan_record: Best-effort extraction of raw scan-record bytes from service metadata.
+custom_components.securemtr.local_ble_commissioning._extract_first_bytes: Recursively return the first bytes-like payload found in nested objects.
+custom_components.securemtr.local_ble_commissioning._validate_advertisement_identity: Validate discovered advertisement identity before BLE connection.
+custom_components.securemtr.local_ble_commissioning._async_resolve_connectable_device: Resolve a connectable BLEDevice via Home Assistant's shared scanner.
+custom_components.securemtr.local_ble_commissioning._async_commission_over_rpc: Run the full commissioning RPC sequence over BLE.
+custom_components.securemtr.local_ble_commissioning._async_set_owner_with_retry: Set receiver owner with app-equivalent retries for timeout error 20001.
+custom_components.securemtr.local_ble_commissioning._default_han_device_details: Build a default two-channel HAN device list for E7+ commissioning.
+custom_components.securemtr.local_ble_commissioning._resolve_timezone_id: Resolve the gateway timezone ID with conservative fallback to app default.
+custom_components.securemtr.local_ble_commissioning._async_resolve_service_bois: Resolve mode and hot-water BOIs from GetAllServiceValues response.
+custom_components.securemtr.local_ble_commissioning.async_execute_local_command: Execute one local BLE command over an authenticated BLE session.
+custom_components.securemtr.local_ble_commissioning._async_execute_ble_rpc_command: Connect over BLE, optionally authorize, and execute one RPC request.
+custom_components.securemtr.local_ble_commissioning.async_commission_local_ble: Commission an E7+ device and return persisted BLE credential values.
+custom_components.securemtr.local_ble_commissioning._BleUartRpcClient.async_rpc_request: Send one RPC request and return the response result payload.
+custom_components.securemtr.local_ble_commissioning._BleUartRpcClient._async_send_payload: Frame and transmit one BLE payload.
+custom_components.securemtr.local_ble_commissioning._BleUartRpcClient._async_wait_for_response_payload: Wait for one BLE response payload and decode transport framing.
+custom_components.securemtr.local_ble_commissioning._BleUartRpcClient._reset_response_state: Clear staged response packets and readiness state.
+custom_components.securemtr.__init__.async_refresh_entry_state: Refresh runtime state for one config entry using its active transport.
+custom_components.securemtr.__init__._default_energy_state: Return the default per-zone energy payload for sensor hydration.
+custom_components.securemtr.__init__._merge_local_snapshot_energy: Merge local snapshot energy totals into runtime sensor state.
+custom_components.securemtr.__init__._snapshot_has_consumption_energy: Return whether parsed consumption rows include usable energy values.
+custom_components.securemtr.__init__._merge_local_consumption_energy: Merge parsed local consumption day rows into the persisted accumulator.
+custom_components.securemtr.__init__._merge_local_snapshot_statistics: Merge local snapshot duration summaries into runtime statistics state.
+custom_components.securemtr.__init__._async_refresh_local_ble_runtime: Refresh runtime state from a local BLE GetAllServiceValues snapshot.
+custom_components.securemtr.local_ble_commissioning.LocalBleSnapshot: Represent parsed local BLE values for runtime sensors.
+custom_components.securemtr.local_ble_commissioning.LocalBleWorker._ordered_consumption_args_candidates: Return consumption selector candidates ordered by recent success.
+custom_components.securemtr.local_ble_commissioning._extract_service_values: Extract ServiceValuesDTO entries from a GetAllServiceValues response.
+custom_components.securemtr.local_ble_commissioning._extract_characteristic_map: Build a characteristic-id map from a service values entry.
+custom_components.securemtr.local_ble_commissioning._extract_numeric_value: Return a float value for a dictionary key when numeric.
+custom_components.securemtr.local_ble_commissioning._extract_duration_minutes: Extract duration minutes from a consumption row with zero default.
+custom_components.securemtr.local_ble_commissioning._extract_consumption_energy_kwh: Extract a daily energy value from DynamicTariff rows as kWh.
+custom_components.securemtr.local_ble_commissioning._is_notify_already_acquired_error: Return True when BlueZ reports notifications already acquired.
+custom_components.securemtr.local_ble_commissioning._format_debug_payload: Return a bounded JSON-like string for BLE debug logging.
+custom_components.securemtr.local_ble_commissioning._summarize_service_values: Return compact per-service diagnostics from service values payloads.
+custom_components.securemtr.local_ble_commissioning._extract_service_boi: Return a valid business-object identifier from a service values entry.
+custom_components.securemtr.local_ble_commissioning._find_service_boi: Find the first BOI for the requested service identifier.
+custom_components.securemtr.local_ble_commissioning._active_energy_to_kwh: Convert ActiveEnergy characteristic values to kilowatt-hours.
+custom_components.securemtr.local_ble_commissioning._minutes_to_hours: Convert runtime minutes into fractional hours.
+custom_components.securemtr.local_ble_commissioning._parse_consumption_report_day: Parse the dynamic tariff timestamp into an ISO report day.
+custom_components.securemtr.local_ble_commissioning._extract_consumption_rows: Extract DynamicDaySchedule-like rows from a consumption payload.
+custom_components.securemtr.local_ble_commissioning._parse_consumption_day_rows: Parse DynamicTariff payload rows into normalized per-day values.
+custom_components.securemtr.local_ble_commissioning._select_latest_consumption_row: Select the latest parsed consumption row using timestamp ordering.
+custom_components.securemtr.local_ble_commissioning._consumption_rows_have_energy: Return whether parsed consumption rows contain OP/BP energy values.
+custom_components.securemtr.local_ble_commissioning._parse_consumption_state: Parse DynamicTariff consumption payload into recent duration summaries.
+custom_components.securemtr.local_ble_commissioning._parse_local_ble_snapshot: Parse GetAllServiceValues payload into local runtime fields.
+custom_components.securemtr.local_ble_commissioning.async_read_local_snapshot: Read and parse local BLE service values for runtime sensors.
+custom_components.securemtr.local_ble_commissioning._async_read_ble_snapshot_once: Connect over BLE once and read a snapshot payload.
+custom_components.securemtr.local_ble_commissioning._async_read_ble_snapshot_payload: Read one local BLE snapshot payload using an active RPC client.
+custom_components.securemtr.local_ble_commissioning._parse_local_weekly_program: Parse one weekly program payload from local BLE RPC format.
+custom_components.securemtr.local_ble_commissioning.async_read_local_weekly_programs: Read primary and boost weekly schedules from local BLE RPC.
+custom_components.securemtr.local_ble_commissioning._async_read_ble_weekly_programs_once: Connect once and read both weekly programs from local BLE RPC.
+custom_components.securemtr.local_ble_commissioning._async_disconnect_client: Disconnect BLE client safely.

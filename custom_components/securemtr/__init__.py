@@ -11,7 +11,7 @@ from decimal import Decimal
 from importlib import import_module
 import logging
 from types import MappingProxyType
-from typing import Any, Literal, TypeVar
+from typing import Any, Literal, TYPE_CHECKING, TypeVar
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from aiohttp import ClientSession, ClientWebSocketResponse
@@ -28,6 +28,8 @@ except ImportError:  # pragma: no cover - fallback for test environment
         """Fallback enum mirroring recorder.StatisticsTable."""
 
         STATISTICS = "statistics"
+
+
 from homeassistant.components.recorder.statistics import StatisticMeanType
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import (
@@ -41,7 +43,10 @@ from homeassistant.core import HomeAssistant, ServiceCall
 from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers import config_validation as cv, entity_registry as er
 from homeassistant.helpers.dispatcher import async_dispatcher_send
-from homeassistant.helpers.event import async_track_point_in_time
+from homeassistant.helpers.event import (
+    async_track_point_in_time,
+    async_track_time_interval,
+)
 from homeassistant.helpers.storage import Store
 from homeassistant.util import dt as dt_util
 import voluptuous as vol
@@ -53,9 +58,12 @@ from .beanbag import (
     BeanbagGateway,
     BeanbagSession,
     BeanbagStateSnapshot,
+    DailyProgram,
+    WeeklyProgram,
 )
 from .energy import EnergyAccumulator
 from .runtime_helpers import async_read_zone_programs
+from .schedule import canonicalize_weekly
 from .statistics import (
     PreparedSamples as PreparedSamples,
     StatisticsOptions as StatisticsOptions,
@@ -76,7 +84,19 @@ from .utils import (
 )
 from .zones import ZONE_KEYS, ZONE_METADATA
 
+if TYPE_CHECKING:
+    from .local_ble_commissioning import LocalBlePriority, LocalBleWorker
+
 DOMAIN = "securemtr"
+
+CONF_CONNECTION_MODE = "connection_mode"
+CONF_DEVICE_TYPE = "device_type"
+CONF_LOCAL_BLE_KEY = "local_ble_key"
+CONF_MAC_ADDRESS = "mac_address"
+CONF_SERIAL_NUMBER = "serial_number"
+
+CONNECTION_MODE_CLOUD = "cloud"
+CONNECTION_MODE_LOCAL_BLE = "local_ble"
 
 CONFIG_SCHEMA = cv.config_entry_only_config_schema(DOMAIN)
 
@@ -104,41 +124,298 @@ _LOGGER = logging.getLogger(__name__)
 
 ENERGY_STORE_VERSION = 1
 SERVICE_RESET_ENERGY = "reset_energy_accumulator"
+SERVICE_SET_PRIMARY_WEEKLY_SCHEDULE = "set_primary_weekly_schedule"
+SERVICE_SET_BOOST_WEEKLY_SCHEDULE = "set_boost_weekly_schedule"
+SERVICE_START_TIMED_BOOST = "start_timed_boost"
 ATTR_ENTRY_ID = "entry_id"
+ATTR_DURATION_MINUTES = "duration_minutes"
+ATTR_SCHEDULE = "schedule"
 ATTR_ZONE = "zone"
 _RESET_SERVICE_FLAG = "_reset_service_registered"
+_REGISTERED_SERVICES_FLAG = "_registered_services"
 _LOGIN_RETRY_DELAY = 5.0
 _MAX_IMMEDIATE_STARTUP_RETRIES = 2
+_LOCAL_BLE_REFRESH_INTERVAL_SECONDS = 60
+_LOCAL_BLE_SNAPSHOT_COALESCE_KEY = "local_snapshot_refresh"
+_LOCAL_BLE_WEEKLY_CACHE_COALESCE_KEY = "local_weekly_cache_refresh"
+_SCHEDULE_WEEKDAY_KEYS: tuple[str, ...] = (
+    "monday",
+    "tuesday",
+    "wednesday",
+    "thursday",
+    "friday",
+    "saturday",
+    "sunday",
+)
 
 
 _ResultT = TypeVar("_ResultT")
+
+
+def _parse_schedule_time(value: Any, *, day: str, field: str, index: int) -> int:
+    """Parse one HH:MM transition time into minutes after midnight."""
+
+    if not isinstance(value, str):
+        raise HomeAssistantError(
+            f"{day} {field}[{index}] must be a string in HH:MM format"
+        )
+
+    raw = value.strip()
+    parts = raw.split(":")
+    if len(parts) != 2 or not all(part.isdigit() for part in parts):
+        raise HomeAssistantError(
+            f"{day} {field}[{index}] must use HH:MM 24-hour format"
+        )
+
+    hour = int(parts[0])
+    minute = int(parts[1])
+    if hour < 0 or hour > 23 or minute < 0 or minute > 59:
+        raise HomeAssistantError(
+            f"{day} {field}[{index}] is out of range; expected 00:00-23:59"
+        )
+
+    total_minutes = hour * 60 + minute
+    if total_minutes % 15 != 0:
+        raise HomeAssistantError(
+            f"{day} {field}[{index}] must align to 15-minute intervals"
+        )
+    return total_minutes
+
+
+def _parse_daily_schedule(day: str, payload: Any) -> DailyProgram:
+    """Validate one day schedule payload and return a DailyProgram."""
+
+    if not isinstance(payload, Mapping):
+        raise HomeAssistantError(
+            f"{day} schedule must be a mapping with 'on' and 'off' lists"
+        )
+
+    unknown_keys = {str(key) for key in payload if key not in {"on", "off"}}
+    if unknown_keys:
+        raise HomeAssistantError(
+            f"{day} schedule contains unsupported keys: {', '.join(sorted(unknown_keys))}"
+        )
+
+    on_raw = payload.get("on", [])
+    off_raw = payload.get("off", [])
+    if not isinstance(on_raw, list) or not isinstance(off_raw, list):
+        raise HomeAssistantError(f"{day} schedule 'on' and 'off' must be lists")
+
+    if len(on_raw) > 3 or len(off_raw) > 3:
+        raise HomeAssistantError(
+            f"{day} schedule supports at most 3 on and 3 off transitions"
+        )
+
+    on_minutes = [
+        _parse_schedule_time(value, day=day, field="on", index=index)
+        for index, value in enumerate(on_raw, start=1)
+    ]
+    off_minutes = [
+        _parse_schedule_time(value, day=day, field="off", index=index)
+        for index, value in enumerate(off_raw, start=1)
+    ]
+
+    all_minutes = on_minutes + off_minutes
+    if not all_minutes:
+        raise HomeAssistantError(
+            f"{day} schedule must include at least one transition"
+        )
+    if len(all_minutes) > 6:
+        raise HomeAssistantError(
+            f"{day} schedule supports at most 6 transitions"
+        )
+    if len(set(all_minutes)) != len(all_minutes):
+        raise HomeAssistantError(
+            f"{day} schedule cannot contain duplicate transition times"
+        )
+
+    on_sorted = sorted(on_minutes)
+    off_sorted = sorted(off_minutes)
+
+    on_triplet = tuple(on_sorted + [None] * (3 - len(on_sorted)))
+    off_triplet = tuple(off_sorted + [None] * (3 - len(off_sorted)))
+    return DailyProgram(on_triplet, off_triplet)
+
+
+def _parse_weekly_schedule(payload: Any) -> WeeklyProgram:
+    """Validate and parse a weekly schedule service payload."""
+
+    if not isinstance(payload, Mapping):
+        raise HomeAssistantError("Schedule must be a mapping of weekday names")
+
+    normalized: dict[str, Any] = {}
+    for key, value in payload.items():
+        if not isinstance(key, str):
+            raise HomeAssistantError("Schedule day keys must be strings")
+        day_key = key.strip().lower()
+        if day_key not in _SCHEDULE_WEEKDAY_KEYS:
+            raise HomeAssistantError(
+                f"Unsupported weekday '{key}'; expected Monday through Sunday"
+            )
+        if day_key in normalized:
+            raise HomeAssistantError(f"Duplicate schedule day '{key}'")
+        normalized[day_key] = value
+
+    missing_days = [day for day in _SCHEDULE_WEEKDAY_KEYS if day not in normalized]
+    if missing_days:
+        missing = ", ".join(day.title() for day in missing_days)
+        raise HomeAssistantError(f"Schedule is missing required days: {missing}")
+
+    parsed_days = [
+        _parse_daily_schedule(day.title(), normalized[day])
+        for day in _SCHEDULE_WEEKDAY_KEYS
+    ]
+
+    return (
+        parsed_days[0],
+        parsed_days[1],
+        parsed_days[2],
+        parsed_days[3],
+        parsed_days[4],
+        parsed_days[5],
+        parsed_days[6],
+    )
+
+
+def _format_transition_minutes(minutes: Iterable[int | None]) -> list[str]:
+    """Convert transition minute offsets into HH:MM strings."""
+
+    rendered: list[str] = []
+    for minute in minutes:
+        if minute is None:
+            continue
+        hour, remainder = divmod(minute, 60)
+        rendered.append(f"{hour:02d}:{remainder:02d}")
+    return rendered
+
+
+def _format_weekly_program(program: WeeklyProgram) -> dict[str, dict[str, list[str]]]:
+    """Format a WeeklyProgram into day-keyed on/off HH:MM lists."""
+
+    rendered: dict[str, dict[str, list[str]]] = {}
+    for day_key, daily in zip(_SCHEDULE_WEEKDAY_KEYS, program, strict=False):
+        rendered[day_key] = {
+            "on": _format_transition_minutes(daily.on_minutes),
+            "off": _format_transition_minutes(daily.off_minutes),
+        }
+    return rendered
+
+
+def _cache_weekly_program(runtime: SecuremtrRuntimeData, zone: str, program: WeeklyProgram) -> None:
+    """Update runtime weekly-program caches for one zone."""
+
+    programs = dict(runtime.weekly_programs or {})
+    programs[zone] = program
+    runtime.weekly_programs = programs
+
+    canonicals = dict(runtime.weekly_canonicals or {})
+    canonicals[zone] = canonicalize_weekly(program)
+    runtime.weekly_canonicals = canonicals
+
+
+def _cache_weekly_programs(
+    runtime: SecuremtrRuntimeData,
+    programs: Mapping[str, WeeklyProgram | None],
+    canonicals: Mapping[str, list[tuple[int, int]] | None],
+) -> None:
+    """Store fetched weekly programs and canonical intervals in runtime."""
+
+    runtime.weekly_programs = dict(programs)
+    runtime.weekly_canonicals = dict(canonicals)
 
 
 def _async_register_services(hass: HomeAssistant) -> None:
     """Register SecureMTR domain services once per Home Assistant instance."""
 
     domain_data = hass.data.setdefault(DOMAIN, {})
-    if domain_data.get(_RESET_SERVICE_FLAG):
-        return
 
-    schema = vol.Schema(
+    registered_raw = domain_data.get(_REGISTERED_SERVICES_FLAG)
+    if isinstance(registered_raw, set):
+        registered_services = set(registered_raw)
+    elif isinstance(registered_raw, (list, tuple)):
+        registered_services = {str(item) for item in registered_raw}
+    else:
+        registered_services: set[str] = set()
+
+    def _service_exists(service_name: str) -> bool:
+        """Return whether a service is already registered for this domain."""
+
+        has_service = getattr(hass.services, "has_service", None)
+        if callable(has_service):
+            with suppress(Exception):
+                return bool(has_service(DOMAIN, service_name))
+
+        handlers = getattr(hass.services, "handlers", None)
+        if isinstance(handlers, dict):
+            return (DOMAIN, service_name) in handlers
+
+        return False
+
+    if (
+        domain_data.get(_RESET_SERVICE_FLAG)
+        and _service_exists(SERVICE_RESET_ENERGY)
+    ):
+        registered_services.add(SERVICE_RESET_ENERGY)
+
+    reset_schema = vol.Schema(
         {
-            vol.Required(ATTR_ENTRY_ID): str,
+            vol.Optional(ATTR_ENTRY_ID): str,
             vol.Optional(ATTR_ZONE, default=ZONE_KEYS[0]): vol.In(ZONE_KEYS),
         }
     )
+    start_boost_schema = vol.Schema(
+        {
+            vol.Optional(ATTR_ENTRY_ID): str,
+            vol.Required(ATTR_DURATION_MINUTES): vol.All(
+                vol.Coerce(int), vol.Range(min=1, max=24 * 60)
+            ),
+        }
+    )
+    set_schedule_schema = vol.Schema(
+        {
+            vol.Optional(ATTR_ENTRY_ID): str,
+            vol.Required(ATTR_SCHEDULE): dict,
+        }
+    )
 
-    async def _async_handle_reset(call: ServiceCall) -> None:
-        """Reset the cumulative energy state for a config entry zone."""
+    def _resolve_loaded_entry(
+        call: ServiceCall,
+        *,
+        require_config_entry: bool = True,
+    ) -> tuple[str, Any | None, SecuremtrRuntimeData]:
+        """Resolve entry_id + runtime from explicit entry_id."""
 
-        entry_id: str = call.data[ATTR_ENTRY_ID]
-        zone: str = call.data[ATTR_ZONE]
+        entry_id_raw = call.data.get(ATTR_ENTRY_ID)
+
+        entry_id: str | None = None
+        if isinstance(entry_id_raw, str) and entry_id_raw.strip():
+            entry_id = entry_id_raw.strip()
+
+        if entry_id is None:
+            raise HomeAssistantError("entry_id is required for SecureMTR actions")
+
         domain_state = hass.data.get(DOMAIN, {})
         runtime: SecuremtrRuntimeData | None = domain_state.get(entry_id)
         if runtime is None:
             raise HomeAssistantError(
-                f"SecureMTR entry {entry_id} is not loaded; cannot reset energy"
+                f"SecureMTR entry {entry_id} is not loaded"
             )
+
+        entry = runtime.config_entry
+        if require_config_entry and (entry is None or not hasattr(entry, "data")):
+            raise HomeAssistantError(
+                f"SecureMTR entry {entry_id} config metadata is unavailable"
+            )
+        return entry_id, entry, runtime
+
+    async def _async_handle_reset(call: ServiceCall) -> None:
+        """Reset the cumulative energy state for a config entry zone."""
+
+        entry_id, _entry, runtime = _resolve_loaded_entry(
+            call,
+            require_config_entry=False,
+        )
+        zone: str = call.data[ATTR_ZONE]
 
         accumulator = runtime.energy_accumulator
         if accumulator is None:
@@ -157,13 +434,172 @@ def _async_register_services(hass: HomeAssistant) -> None:
         _LOGGER.info("Reset cumulative energy state for %s zone %s", entry_id, zone)
         async_dispatch_runtime_update(hass, entry_id)
 
-    hass.services.async_register(
-        DOMAIN,
-        SERVICE_RESET_ENERGY,
-        _async_handle_reset,
-        schema=schema,
+    async def _async_handle_start_timed_boost(call: ServiceCall) -> None:
+        """Start a timed boost for an arbitrary duration in minutes."""
+
+        entry_id, entry, runtime = _resolve_loaded_entry(call)
+        duration_minutes: int = call.data[ATTR_DURATION_MINUTES]
+        controller = runtime.controller
+        if controller is None:
+            raise HomeAssistantError("Secure Meters controller is not connected")
+
+        if runtime.connection_mode == CONNECTION_MODE_LOCAL_BLE:
+            from .local_ble_commissioning import (  # noqa: PLC0415
+                LocalBleCommissioningError,
+                LocalBlePriority,
+            )
+
+            try:
+                worker = await async_get_local_ble_worker(hass, entry, runtime)
+                await worker.async_execute_local_command(
+                    method_name="start_timed_boost",
+                    operation_kwargs={ATTR_DURATION_MINUTES: duration_minutes},
+                    priority=LocalBlePriority.USER_COMMAND,
+                )
+            except (LocalBleCommissioningError, ValueError) as error:
+                _LOGGER.error("Failed to start Secure Meters timed boost: %s", error)
+                raise HomeAssistantError(
+                    "Failed to start Secure Meters timed boost"
+                ) from error
+        else:
+
+            async def _start_boost(
+                backend: BeanbagBackend,
+                session: BeanbagSession,
+                websocket: ClientWebSocketResponse,
+                active_controller: SecuremtrController,
+            ) -> None:
+                """Send timed-boost start using the cloud websocket transport."""
+
+                await backend.start_timed_boost(
+                    session,
+                    websocket,
+                    active_controller.gateway_id,
+                    duration_minutes=duration_minutes,
+                )
+
+            await async_execute_controller_command(
+                runtime,
+                entry,
+                _start_boost,
+                log_context="Failed to start Secure Meters timed boost",
+                exception_types=(BeanbagError, ValueError),
+            )
+
+        now_local = dt_util.now()
+        end_local = now_local + timedelta(minutes=duration_minutes)
+        end_minute = end_local.hour * 60 + end_local.minute
+        runtime.timed_boost_active = True
+        runtime.timed_boost_end_minute = end_minute
+        runtime.timed_boost_end_time = coerce_end_time(end_minute)
+        async_dispatch_runtime_update(hass, entry_id)
+
+    async def _async_handle_set_weekly_schedule(
+        call: ServiceCall,
+        *,
+        zone: Literal["primary", "boost"],
+    ) -> None:
+        """Persist a weekly schedule update for one zone."""
+
+        entry_id, entry, runtime = _resolve_loaded_entry(call)
+        schedule_payload = call.data[ATTR_SCHEDULE]
+        controller = runtime.controller
+        if controller is None:
+            raise HomeAssistantError("Secure Meters controller is not connected")
+
+        weekly_program = _parse_weekly_schedule(schedule_payload)
+
+        if runtime.connection_mode == CONNECTION_MODE_LOCAL_BLE:
+            from .local_ble_commissioning import (  # noqa: PLC0415
+                LocalBleCommissioningError,
+                LocalBlePriority,
+            )
+
+            try:
+                worker = await async_get_local_ble_worker(hass, entry, runtime)
+                await worker.async_write_local_weekly_program(
+                    zone=zone,
+                    program=weekly_program,
+                    zone_bois=runtime.schedule_zone_bois,
+                    priority=LocalBlePriority.SCHEDULE_WRITE,
+                )
+            except (LocalBleCommissioningError, ValueError) as error:
+                _LOGGER.error(
+                    "Failed to update Secure Meters %s schedule: %s",
+                    zone,
+                    error,
+                )
+                raise HomeAssistantError(
+                    f"Failed to update Secure Meters {zone} schedule"
+                ) from error
+        else:
+
+            async def _write_weekly_program(
+                backend: BeanbagBackend,
+                session: BeanbagSession,
+                websocket: ClientWebSocketResponse,
+                active_controller: SecuremtrController,
+            ) -> None:
+                """Write one zone weekly schedule through cloud websocket."""
+
+                await backend.write_weekly_program(
+                    session,
+                    websocket,
+                    active_controller.gateway_id,
+                    weekly_program,
+                    zone=zone,
+                )
+
+            await async_execute_controller_command(
+                runtime,
+                entry,
+                _write_weekly_program,
+                log_context=f"Failed to update Secure Meters {zone} schedule",
+                exception_types=(BeanbagError, ValueError),
+            )
+
+        _cache_weekly_program(runtime, zone, weekly_program)
+        async_dispatch_runtime_update(hass, entry_id)
+
+    async def _async_handle_set_primary_weekly_schedule(call: ServiceCall) -> None:
+        """Update the primary zone weekly schedule."""
+
+        await _async_handle_set_weekly_schedule(call, zone="primary")
+
+    async def _async_handle_set_boost_weekly_schedule(call: ServiceCall) -> None:
+        """Update the boost zone weekly schedule."""
+
+        await _async_handle_set_weekly_schedule(call, zone="boost")
+
+    service_specs: tuple[tuple[str, Callable[..., Any], vol.Schema], ...] = (
+        (SERVICE_RESET_ENERGY, _async_handle_reset, reset_schema),
+        (SERVICE_START_TIMED_BOOST, _async_handle_start_timed_boost, start_boost_schema),
+        (
+            SERVICE_SET_PRIMARY_WEEKLY_SCHEDULE,
+            _async_handle_set_primary_weekly_schedule,
+            set_schedule_schema,
+        ),
+        (
+            SERVICE_SET_BOOST_WEEKLY_SCHEDULE,
+            _async_handle_set_boost_weekly_schedule,
+            set_schedule_schema,
+        ),
     )
-    domain_data[_RESET_SERVICE_FLAG] = True
+
+    for service_name, handler, schema in service_specs:
+        if service_name in registered_services or _service_exists(service_name):
+            registered_services.add(service_name)
+            continue
+        hass.services.async_register(
+            DOMAIN,
+            service_name,
+            handler,
+            schema=schema,
+        )
+        registered_services.add(service_name)
+
+    domain_data[_REGISTERED_SERVICES_FLAG] = registered_services
+    domain_data[_RESET_SERVICE_FLAG] = SERVICE_RESET_ENERGY in registered_services
 
 
 async def _async_ensure_utility_meters(hass: HomeAssistant, entry: ConfigEntry) -> None:
@@ -319,7 +755,7 @@ async def _async_ensure_utility_meters(hass: HomeAssistant, entry: ConfigEntry) 
                 CONF_TARIFFS: [],
                 CONF_METER_NET_CONSUMPTION: False,
                 CONF_METER_DELTA_VALUES: False,
-                CONF_METER_PERIODICALLY_RESETTING: True,
+                CONF_METER_PERIODICALLY_RESETTING: False,
                 CONF_SENSOR_ALWAYS_AVAILABLE: False,
             }
 
@@ -433,8 +869,11 @@ def _helper_options_match(
 
     options = helper_entry.options
     meter_type = options.get(CONF_METER_TYPE)
-    return options.get(CONF_SOURCE_SENSOR) == source_entity and (
-        meter_type == cycle or meter_type is None
+    periodically_resetting = options.get(CONF_METER_PERIODICALLY_RESETTING)
+    return (
+        options.get(CONF_SOURCE_SENSOR) == source_entity
+        and (meter_type == cycle or meter_type is None)
+        and periodically_resetting is False
     )
 
 
@@ -462,6 +901,7 @@ class SecuremtrRuntimeData:
     """Track runtime Beanbag backend state for a config entry."""
 
     backend: BeanbagBackend
+    connection_mode: str = CONNECTION_MODE_CLOUD
     config_entry: ConfigEntry | None = None
     http_session: ClientSession | None = None
     session: BeanbagSession | None = None
@@ -486,10 +926,16 @@ class SecuremtrRuntimeData:
     consumption_schedule_unsub: Callable[[], None] | None = None
     consumption_refresh_callback: Callable[[], None] | None = None
     consumption_refresh_pending: bool = False
+    local_refresh_unsub: Callable[[], None] | None = None
+    local_refresh_callback: Callable[[], None] | None = None
+    local_ble_worker: "LocalBleWorker | None" = None
     energy_store: Store[dict[str, Any]] | None = None
     energy_state: dict[str, Any] | None = None
     energy_accumulator: EnergyAccumulator | None = None
     statistics_recent: dict[str, Any] | None = None
+    schedule_zone_bois: dict[str, int] | None = None
+    weekly_programs: dict[str, WeeklyProgram | None] | None = None
+    weekly_canonicals: dict[str, list[tuple[int, int]] | None] | None = None
     energy_entity_ids: dict[str, str] = field(default_factory=dict)
 
 
@@ -505,6 +951,85 @@ def _entry_display_name(entry: ConfigEntry) -> str:
         return entry_id
 
     return DOMAIN
+
+
+def _entry_connection_mode(entry: ConfigEntry) -> str:
+    """Return the configured connection mode for an entry."""
+
+    mode = entry.data.get(CONF_CONNECTION_MODE)
+    if isinstance(mode, str) and mode.strip():
+        return mode.strip().lower()
+    return CONNECTION_MODE_CLOUD
+
+
+def _build_local_controller(entry: ConfigEntry) -> SecuremtrController:
+    """Build a placeholder controller model for local BLE entries."""
+
+    serial_raw = entry.data.get(CONF_SERIAL_NUMBER)
+    serial_number = serial_raw.strip() if isinstance(serial_raw, str) else None
+    if serial_number == "":
+        serial_number = None
+
+    mac_raw = entry.data.get(CONF_MAC_ADDRESS)
+    mac_address = mac_raw.strip().upper() if isinstance(mac_raw, str) else ""
+
+    identifier = serial_number or mac_address or entry.entry_id
+    device_type = entry.data.get(CONF_DEVICE_TYPE)
+    model = str(device_type).strip().upper() if isinstance(device_type, str) else "E7+"
+
+    return SecuremtrController(
+        identifier=identifier,
+        name=DEFAULT_DEVICE_LABEL,
+        gateway_id=mac_address or identifier,
+        serial_number=serial_number,
+        model=model,
+    )
+
+
+async def async_get_local_ble_worker(
+    hass: HomeAssistant,
+    entry: ConfigEntry,
+    runtime: SecuremtrRuntimeData,
+) -> "LocalBleWorker":
+    """Return a configured local BLE worker for one runtime entry."""
+
+    if runtime.connection_mode != CONNECTION_MODE_LOCAL_BLE:
+        raise HomeAssistantError("SecureMTR entry is not configured for local BLE")
+
+    controller = runtime.controller
+    if controller is None:
+        raise HomeAssistantError("Secure Meters controller is not connected")
+
+    ble_key = entry.data.get(CONF_LOCAL_BLE_KEY)
+    if not isinstance(ble_key, str) or not ble_key:
+        raise HomeAssistantError("Local BLE key is missing for this entry")
+
+    from .local_ble_commissioning import LocalBleWorker  # noqa: PLC0415
+
+    existing = runtime.local_ble_worker
+    if existing is not None and existing.matches(
+        mac_address=controller.gateway_id,
+        serial_number=controller.serial_number,
+        ble_key=ble_key,
+    ):
+        return existing
+
+    if existing is not None:
+        await existing.async_close()
+
+    try:
+        worker = LocalBleWorker(
+            hass,
+            mac_address=controller.gateway_id,
+            serial_number=controller.serial_number,
+            ble_key=ble_key,
+        )
+    except ValueError as error:
+        raise HomeAssistantError(
+            "Local BLE MAC address is invalid for this entry"
+        ) from error
+    runtime.local_ble_worker = worker
+    return worker
 
 
 def _utility_meter_identifier(hass: HomeAssistant, entry: ConfigEntry) -> str:
@@ -694,15 +1219,12 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     runtime = SecuremtrRuntimeData(
         backend=BeanbagBackend(session), http_session=session
     )
+    runtime.connection_mode = _entry_connection_mode(entry)
     runtime.config_entry = entry
     hass.data[DOMAIN][entry.entry_id] = runtime
 
     if not hasattr(entry, "options"):
         setattr(entry, "options", {})
-
-    statistics_options = _load_statistics_options(entry)
-    schedule_timezone = statistics_options.timezone
-    schedule_timezone_name = statistics_options.timezone_name
 
     runtime.energy_store = Store(
         hass,
@@ -710,101 +1232,164 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         _energy_store_key(entry),
     )
 
-    runtime.startup_task = hass.async_create_task(
-        _async_start_backend(hass, entry, runtime)
-    )
+    if runtime.connection_mode == CONNECTION_MODE_LOCAL_BLE:
+        runtime.controller = _build_local_controller(entry)
+        runtime.controller_ready.set()
 
-    def _queue_consumption_refresh() -> None:
-        """Schedule the asynchronous consumption metrics task safely."""
+        accumulator = await _ensure_energy_accumulator(hass, entry, runtime)
+        runtime.energy_state = accumulator.as_sensor_state()
 
-        def _schedule() -> None:
-            hass.async_create_task(consumption_metrics(hass, entry))
+        def _queue_local_refresh() -> None:
+            """Schedule one asynchronous local BLE snapshot refresh."""
 
-        loop = getattr(hass, "loop", None)
-        if loop is None:
-            hass.async_create_task(consumption_metrics(hass, entry))
-            return
+            async def _async_safe_local_refresh() -> None:
+                """Run one local BLE refresh and absorb unexpected task errors."""
 
-        try:
-            running_loop = asyncio.get_running_loop()
-        except RuntimeError:
-            running_loop = None
+                try:
+                    await _async_refresh_local_ble_runtime(hass, entry)
+                except Exception:
+                    _LOGGER.exception(
+                        "Unexpected error during local BLE refresh for %s",
+                        entry_identifier,
+                    )
 
-        if running_loop is loop:
-            _schedule()
-        else:
-            loop.call_soon_threadsafe(_schedule)
+            def _schedule() -> None:
+                hass.async_create_task(_async_safe_local_refresh())
 
-    def _next_consumption_refresh(reference: datetime | None = None) -> datetime:
-        """Return the next 01:00 UTC instant for the configured timezone."""
+            loop = getattr(hass, "loop", None)
+            if loop is None:
+                hass.async_create_task(_async_refresh_local_ble_runtime(hass, entry))
+                return
 
-        base = reference or dt_util.utcnow()
-        if base.tzinfo is None:
-            base = base.replace(tzinfo=dt_util.UTC)
-        base_utc = dt_util.as_utc(base)
-        local_now = base_utc.astimezone(schedule_timezone)
-        target_local = local_now.replace(hour=1, minute=0, second=0, microsecond=0)
-        if local_now >= target_local:
-            next_day = local_now.date() + timedelta(days=1)
-            target_local = datetime.combine(
-                next_day,
-                time(1, 0, tzinfo=schedule_timezone),
-            )
-        return target_local.astimezone(dt_util.UTC)
+            try:
+                running_loop = asyncio.get_running_loop()
+            except RuntimeError:
+                running_loop = None
 
-    schedule_unsub: Callable[[], None] | None = None
+            if running_loop is loop:
+                _schedule()
+            else:
+                loop.call_soon_threadsafe(_schedule)
 
-    def _schedule_next_refresh(reference: datetime | None = None) -> None:
-        """Install a one-shot timer for the next consumption refresh."""
+        def _scheduled_local_refresh(_now: datetime) -> None:
+            """Trigger the interval-based local BLE snapshot refresh."""
 
-        nonlocal schedule_unsub
+            _queue_local_refresh()
 
-        if schedule_unsub is not None:
-            with suppress(Exception):
-                schedule_unsub()
-            schedule_unsub = None
-
-        next_refresh = _next_consumption_refresh(reference)
-        _LOGGER.debug(
-            "Scheduling consumption metrics refresh for %s at %s (%s)",
-            entry_identifier,
-            next_refresh.isoformat(),
-            schedule_timezone_name,
-        )
-        schedule_unsub = async_track_point_in_time(
+        runtime.local_refresh_unsub = async_track_time_interval(
             hass,
-            _scheduled_consumption_refresh,
-            next_refresh,
+            _scheduled_local_refresh,
+            timedelta(seconds=_LOCAL_BLE_REFRESH_INTERVAL_SECONDS),
+        )
+        runtime.local_refresh_callback = _queue_local_refresh
+        hass.async_create_task(_async_refresh_weekly_program_cache(hass, entry))
+
+        _LOGGER.info(
+            "Configured local BLE mode for %s (serial=%s)",
+            entry_identifier,
+            runtime.controller.serial_number,
+        )
+    else:
+        statistics_options = _load_statistics_options(entry)
+        schedule_timezone = statistics_options.timezone
+        schedule_timezone_name = statistics_options.timezone_name
+
+        runtime.startup_task = hass.async_create_task(
+            _async_start_backend(hass, entry, runtime)
         )
 
-    def _scheduled_consumption_refresh(now: datetime) -> None:
-        """Trigger the scheduled consumption metrics task."""
+        def _queue_consumption_refresh() -> None:
+            """Schedule the asynchronous consumption metrics task safely."""
+
+            def _schedule() -> None:
+                hass.async_create_task(consumption_metrics(hass, entry))
+
+            loop = getattr(hass, "loop", None)
+            if loop is None:
+                hass.async_create_task(consumption_metrics(hass, entry))
+                return
+
+            try:
+                running_loop = asyncio.get_running_loop()
+            except RuntimeError:
+                running_loop = None
+
+            if running_loop is loop:
+                _schedule()
+            else:
+                loop.call_soon_threadsafe(_schedule)
+
+        def _next_consumption_refresh(reference: datetime | None = None) -> datetime:
+            """Return the next 01:00 UTC instant for the configured timezone."""
+
+            base = reference or dt_util.utcnow()
+            if base.tzinfo is None:
+                base = base.replace(tzinfo=dt_util.UTC)
+            base_utc = dt_util.as_utc(base)
+            local_now = base_utc.astimezone(schedule_timezone)
+            target_local = local_now.replace(hour=1, minute=0, second=0, microsecond=0)
+            if local_now >= target_local:
+                next_day = local_now.date() + timedelta(days=1)
+                target_local = datetime.combine(
+                    next_day,
+                    time(1, 0, tzinfo=schedule_timezone),
+                )
+            return target_local.astimezone(dt_util.UTC)
+
+        schedule_unsub: Callable[[], None] | None = None
+
+        def _schedule_next_refresh(reference: datetime | None = None) -> None:
+            """Install a one-shot timer for the next consumption refresh."""
+
+            nonlocal schedule_unsub
+
+            if schedule_unsub is not None:
+                with suppress(Exception):
+                    schedule_unsub()
+                schedule_unsub = None
+
+            next_refresh = _next_consumption_refresh(reference)
+            _LOGGER.debug(
+                "Scheduling consumption metrics refresh for %s at %s (%s)",
+                entry_identifier,
+                next_refresh.isoformat(),
+                schedule_timezone_name,
+            )
+            schedule_unsub = async_track_point_in_time(
+                hass,
+                _scheduled_consumption_refresh,
+                next_refresh,
+            )
+
+        def _scheduled_consumption_refresh(now: datetime) -> None:
+            """Trigger the scheduled consumption metrics task."""
+
+            _LOGGER.debug(
+                "Scheduled consumption metrics refresh triggered for %s",
+                entry_identifier,
+            )
+            _queue_consumption_refresh()
+            _schedule_next_refresh(now + timedelta(seconds=1))
+
+        _schedule_next_refresh()
+
+        def _unsubscribe_schedules() -> None:
+            """Cancel every scheduled consumption metrics callback."""
+
+            nonlocal schedule_unsub
+
+            if schedule_unsub is not None:
+                with suppress(Exception):
+                    schedule_unsub()
+                schedule_unsub = None
+
+        runtime.consumption_schedule_unsub = _unsubscribe_schedules
+        runtime.consumption_refresh_callback = _queue_consumption_refresh
 
         _LOGGER.debug(
-            "Scheduled consumption metrics refresh triggered for %s", entry_identifier
+            "Queuing immediate consumption metrics refresh for %s", entry_identifier
         )
         _queue_consumption_refresh()
-        _schedule_next_refresh(now + timedelta(seconds=1))
-
-    _schedule_next_refresh()
-
-    def _unsubscribe_schedules() -> None:
-        """Cancel every scheduled consumption metrics callback."""
-
-        nonlocal schedule_unsub
-
-        if schedule_unsub is not None:
-            with suppress(Exception):
-                schedule_unsub()
-            schedule_unsub = None
-
-    runtime.consumption_schedule_unsub = _unsubscribe_schedules
-    runtime.consumption_refresh_callback = _queue_consumption_refresh
-
-    _LOGGER.debug(
-        "Queuing immediate consumption metrics refresh for %s", entry_identifier
-    )
-    _queue_consumption_refresh()
 
     config_entries_helper = getattr(hass, "config_entries", None)
     if config_entries_helper is not None:
@@ -819,6 +1404,12 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         )
 
     await _async_ensure_utility_meters(hass, entry)
+
+    if (
+        runtime.connection_mode == CONNECTION_MODE_LOCAL_BLE
+        and runtime.local_refresh_callback is not None
+    ):
+        runtime.local_refresh_callback()
 
     _LOGGER.info("Config entry setup completed for securemtr: %s", entry_identifier)
     return True
@@ -859,6 +1450,29 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         finally:
             runtime.consumption_schedule_unsub = None
     runtime.consumption_refresh_callback = None
+
+    if runtime.local_refresh_unsub is not None:
+        try:
+            runtime.local_refresh_unsub()
+        except Exception:
+            _LOGGER.exception(
+                "Error while unsubscribing local BLE refresh for %s",
+                entry_identifier,
+            )
+        finally:
+            runtime.local_refresh_unsub = None
+    runtime.local_refresh_callback = None
+
+    if runtime.local_ble_worker is not None:
+        try:
+            await runtime.local_ble_worker.async_close()
+        except Exception:
+            _LOGGER.exception(
+                "Error while stopping local BLE worker for %s",
+                entry_identifier,
+            )
+        finally:
+            runtime.local_ble_worker = None
 
     if runtime.startup_task is not None and not runtime.startup_task.done():
         runtime.startup_task.cancel()
@@ -1366,6 +1980,411 @@ def async_dispatch_runtime_update(hass: HomeAssistant, entry_id: str) -> None:
     async_dispatcher_send(hass, runtime_update_signal(entry_id))
 
 
+async def async_refresh_entry_state(hass: HomeAssistant, entry: ConfigEntry) -> None:
+    """Refresh runtime state for one config entry using its active transport."""
+
+    domain_state = hass.data.get(DOMAIN, {})
+    runtime: SecuremtrRuntimeData | None = domain_state.get(entry.entry_id)
+    if runtime is None:
+        raise HomeAssistantError(
+            f"SecureMTR runtime data is unavailable for entry {entry.entry_id}"
+        )
+
+    if runtime.connection_mode == CONNECTION_MODE_LOCAL_BLE:
+        from .local_ble_commissioning import LocalBlePriority  # noqa: PLC0415
+
+        await _async_refresh_local_ble_runtime(
+            hass,
+            entry,
+            priority=LocalBlePriority.USER_READ,
+            coalesce_key=None,
+        )
+        await _async_refresh_weekly_program_cache(
+            hass,
+            entry,
+            priority=LocalBlePriority.USER_READ,
+            coalesce_key=None,
+        )
+        return
+
+    await consumption_metrics(hass, entry)
+
+
+async def _async_refresh_weekly_program_cache(
+    hass: HomeAssistant,
+    entry: ConfigEntry,
+    *,
+    priority: "LocalBlePriority | int | None" = None,
+    coalesce_key: str | None = _LOCAL_BLE_WEEKLY_CACHE_COALESCE_KEY,
+) -> None:
+    """Refresh runtime weekly schedule caches for a config entry."""
+
+    domain_state = hass.data.get(DOMAIN, {})
+    runtime: SecuremtrRuntimeData | None = domain_state.get(entry.entry_id)
+    if runtime is None:
+        return
+
+    if runtime.connection_mode == CONNECTION_MODE_LOCAL_BLE:
+        from .local_ble_commissioning import (  # noqa: PLC0415
+            LocalBleCommissioningError,
+            LocalBlePriority,
+        )
+
+        try:
+            worker = await async_get_local_ble_worker(hass, entry, runtime)
+            resolved_priority = (
+                LocalBlePriority.BACKGROUND_REFRESH
+                if priority is None
+                else priority
+            )
+            programs, canonicals = await worker.async_read_local_weekly_programs(
+                priority=resolved_priority,
+                coalesce_key=coalesce_key,
+                zone_bois=runtime.schedule_zone_bois,
+            )
+        except (LocalBleCommissioningError, HomeAssistantError) as error:
+            _LOGGER.debug(
+                "Failed to refresh local BLE weekly schedules for %s: %s",
+                _entry_display_name(entry),
+                error,
+            )
+            return
+
+        _cache_weekly_programs(runtime, programs, canonicals)
+        async_dispatch_runtime_update(hass, entry.entry_id)
+
+
+def _default_energy_state() -> dict[str, dict[str, Any]]:
+    """Return the default per-zone energy payload for sensor hydration."""
+
+    return {
+        zone: {
+            "energy_sum": 0.0,
+            "last_day": None,
+            "series_start": None,
+            "offset_kwh": 0.0,
+        }
+        for zone in ZONE_KEYS
+    }
+
+
+def _merge_local_snapshot_energy(
+    runtime: SecuremtrRuntimeData,
+    *,
+    primary_energy_kwh: float | None,
+    boost_energy_kwh: float | None,
+) -> bool:
+    """Merge local snapshot energy totals into runtime sensor state."""
+
+    state_payload = runtime.energy_state
+    if not isinstance(state_payload, dict):
+        state_payload = _default_energy_state()
+        runtime.energy_state = state_payload
+
+    changed = False
+    for zone_key, value in (
+        ("primary", primary_energy_kwh),
+        ("boost", boost_energy_kwh),
+    ):
+        if value is None:
+            continue
+        zone_state = state_payload.get(zone_key)
+        if not isinstance(zone_state, dict):
+            zone_state = {
+                "energy_sum": 0.0,
+                "last_day": None,
+                "series_start": None,
+                "offset_kwh": 0.0,
+            }
+            state_payload[zone_key] = zone_state
+
+        previous = zone_state.get("energy_sum")
+        next_value = float(value)
+        if not isinstance(previous, (int, float)) or float(previous) != next_value:
+            zone_state["energy_sum"] = next_value
+            changed = True
+
+    return changed
+
+
+def _snapshot_has_consumption_energy(
+    consumption_days: list[dict[str, Any]] | None,
+) -> bool:
+    """Return whether parsed consumption rows include usable energy values."""
+
+    if not isinstance(consumption_days, list):
+        return False
+
+    for row in consumption_days:
+        if not isinstance(row, dict):
+            continue
+        for field_name in ("primary_energy_kwh", "boost_energy_kwh"):
+            value = row.get(field_name)
+            if isinstance(value, (int, float)) and value >= 0:
+                return True
+    return False
+
+
+async def _merge_local_consumption_energy(
+    hass: HomeAssistant,
+    entry: ConfigEntry,
+    runtime: SecuremtrRuntimeData,
+    *,
+    consumption_days: list[dict[str, Any]] | None,
+) -> bool:
+    """Merge parsed local consumption day rows into the persisted accumulator."""
+
+    if not isinstance(consumption_days, list):
+        return False
+
+    accumulator = await _ensure_energy_accumulator(hass, entry, runtime)
+    changed = False
+
+    for row in consumption_days:
+        if not isinstance(row, dict):
+            continue
+
+        report_day = row.get("report_day")
+        if not isinstance(report_day, str):
+            continue
+        try:
+            parsed_day = date.fromisoformat(report_day)
+        except ValueError:
+            continue
+
+        for zone_key, field_name in (
+            ("primary", "primary_energy_kwh"),
+            ("boost", "boost_energy_kwh"),
+        ):
+            energy_value = row.get(field_name)
+            if not isinstance(energy_value, (int, float)):
+                continue
+            if energy_value < 0:
+                continue
+            if await accumulator.async_add_day(
+                zone_key, parsed_day, float(energy_value)
+            ):
+                changed = True
+
+    sensor_state = accumulator.as_sensor_state()
+    if runtime.energy_state != sensor_state:
+        runtime.energy_state = sensor_state
+        changed = True
+
+    return changed
+
+
+def _merge_local_snapshot_statistics(
+    runtime: SecuremtrRuntimeData,
+    *,
+    statistics_recent: dict[str, dict[str, Any]] | None,
+) -> bool:
+    """Merge local snapshot duration summaries into runtime statistics state."""
+
+    if not isinstance(statistics_recent, dict):
+        return False
+
+    merged_statistics: dict[str, dict[str, Any]] = {}
+    if isinstance(runtime.statistics_recent, dict):
+        for zone_key, zone_payload in runtime.statistics_recent.items():
+            if isinstance(zone_payload, dict):
+                merged_statistics[zone_key] = dict(zone_payload)
+
+    energy_state = (
+        runtime.energy_state if isinstance(runtime.energy_state, dict) else {}
+    )
+
+    changed = False
+    for zone_key in ZONE_KEYS:
+        zone_update = statistics_recent.get(zone_key)
+        if not isinstance(zone_update, dict):
+            continue
+
+        zone_state = merged_statistics.get(zone_key, {})
+        previous_state = dict(zone_state)
+
+        report_day = zone_update.get("report_day")
+        if isinstance(report_day, str) and report_day:
+            zone_state["report_day"] = report_day
+
+        for field_key in ("runtime_hours", "scheduled_hours"):
+            metric_value = zone_update.get(field_key)
+            if isinstance(metric_value, (int, float)):
+                zone_state[field_key] = float(metric_value)
+
+        zone_energy = energy_state.get(zone_key)
+        if isinstance(zone_energy, dict):
+            energy_sum = zone_energy.get("energy_sum")
+            if isinstance(energy_sum, (int, float)):
+                zone_state["energy_sum"] = float(energy_sum)
+
+        if zone_state != previous_state:
+            changed = True
+
+        if zone_state:
+            merged_statistics[zone_key] = zone_state
+
+    if changed:
+        runtime.statistics_recent = merged_statistics
+    return changed
+
+
+async def _async_refresh_local_ble_runtime(
+    hass: HomeAssistant,
+    entry: ConfigEntry,
+    *,
+    priority: "LocalBlePriority | int | None" = None,
+    coalesce_key: str | None = _LOCAL_BLE_SNAPSHOT_COALESCE_KEY,
+) -> None:
+    """Refresh runtime state from a local BLE GetAllServiceValues snapshot."""
+
+    domain_state = hass.data.get(DOMAIN, {})
+    runtime: SecuremtrRuntimeData | None = domain_state.get(entry.entry_id)
+    if runtime is None or runtime.connection_mode != CONNECTION_MODE_LOCAL_BLE:
+        return
+
+    from .local_ble_commissioning import (  # noqa: PLC0415
+        BLE_BACKGROUND_REFRESH_RETRY_LIMIT,
+        BLE_COMMAND_RETRY_LIMIT,
+        LocalBleCommissioningError,
+        LocalBlePriority,
+    )
+
+    entry_identifier = _entry_display_name(entry)
+    try:
+        worker = await async_get_local_ble_worker(hass, entry, runtime)
+        resolved_priority = (
+            LocalBlePriority.BACKGROUND_REFRESH if priority is None else priority
+        )
+        # Cap the periodic refresh's retries so it cannot block a queued user
+        # command for long; explicit refreshes keep the full budget.
+        resolved_retry_limit = (
+            BLE_BACKGROUND_REFRESH_RETRY_LIMIT
+            if resolved_priority == LocalBlePriority.BACKGROUND_REFRESH
+            else BLE_COMMAND_RETRY_LIMIT
+        )
+        snapshot = await worker.async_read_local_snapshot(
+            priority=resolved_priority,
+            coalesce_key=coalesce_key,
+            retry_limit=resolved_retry_limit,
+        )
+    except HomeAssistantError as error:
+        _LOGGER.debug(
+            "Skipping local BLE refresh for %s: %s",
+            entry_identifier,
+            error,
+        )
+        return
+    except LocalBleCommissioningError as error:
+        _LOGGER.warning(
+            "Failed to refresh local BLE snapshot for %s: %s",
+            entry_identifier,
+            error,
+        )
+        return
+
+    _LOGGER.debug(
+        "Local BLE snapshot for %s: primary_power_on=%s timed_boost_enabled=%s timed_boost_active=%s boost_duration=%s primary_energy_kwh=%s boost_energy_kwh=%s has_consumption_days=%s has_statistics_recent=%s",
+        entry_identifier,
+        snapshot.primary_power_on,
+        snapshot.timed_boost_enabled,
+        snapshot.timed_boost_active,
+        snapshot.timed_boost_duration_minutes,
+        snapshot.primary_energy_kwh,
+        snapshot.boost_energy_kwh,
+        isinstance(snapshot.consumption_days, list),
+        isinstance(snapshot.statistics_recent, dict),
+    )
+
+    changed = False
+
+    if (
+        snapshot.primary_power_on is not None
+        and runtime.primary_power_on != snapshot.primary_power_on
+    ):
+        runtime.primary_power_on = snapshot.primary_power_on
+        changed = True
+
+    if (
+        snapshot.timed_boost_enabled is not None
+        and runtime.timed_boost_enabled != snapshot.timed_boost_enabled
+    ):
+        runtime.timed_boost_enabled = snapshot.timed_boost_enabled
+        changed = True
+
+    was_timed_boost_active = runtime.timed_boost_active is True
+
+    if (
+        snapshot.timed_boost_active is not None
+        and runtime.timed_boost_active != snapshot.timed_boost_active
+    ):
+        runtime.timed_boost_active = snapshot.timed_boost_active
+        changed = True
+
+    if (
+        snapshot.timed_boost_active is True
+        and not was_timed_boost_active
+        and snapshot.timed_boost_duration_minutes
+    ):
+        now_local = dt_util.now()
+        end_local = now_local + timedelta(minutes=snapshot.timed_boost_duration_minutes)
+        end_minute = end_local.hour * 60 + end_local.minute
+        if runtime.timed_boost_end_minute != end_minute:
+            runtime.timed_boost_end_minute = end_minute
+            changed = True
+        end_time = coerce_end_time(end_minute)
+        if runtime.timed_boost_end_time != end_time:
+            runtime.timed_boost_end_time = end_time
+            changed = True
+    elif snapshot.timed_boost_active is False:
+        if runtime.timed_boost_end_minute is not None:
+            runtime.timed_boost_end_minute = None
+            changed = True
+        if runtime.timed_boost_end_time is not None:
+            runtime.timed_boost_end_time = None
+            changed = True
+
+    if _snapshot_has_consumption_energy(snapshot.consumption_days):
+        if await _merge_local_consumption_energy(
+            hass,
+            entry,
+            runtime,
+            consumption_days=snapshot.consumption_days,
+        ):
+            changed = True
+    elif _merge_local_snapshot_energy(
+        runtime,
+        primary_energy_kwh=snapshot.primary_energy_kwh,
+        boost_energy_kwh=snapshot.boost_energy_kwh,
+    ):
+        changed = True
+
+    if _merge_local_snapshot_statistics(
+        runtime,
+        statistics_recent=snapshot.statistics_recent,
+    ):
+        changed = True
+
+    if (
+        isinstance(snapshot.schedule_zone_bois, dict)
+        and runtime.schedule_zone_bois != snapshot.schedule_zone_bois
+    ):
+        runtime.schedule_zone_bois = dict(snapshot.schedule_zone_bois)
+        changed = True
+
+    if changed:
+        async_dispatch_runtime_update(hass, entry.entry_id)
+        _LOGGER.debug(
+            "Updated local BLE runtime snapshot for %s",
+            entry_identifier,
+        )
+    else:
+        _LOGGER.debug(
+            "Local BLE snapshot for %s produced no runtime state changes",
+            entry_identifier,
+        )
+
+
 def coerce_end_time(end_minute: int | None) -> datetime | None:
     """Convert an end-minute payload into an aware datetime."""
 
@@ -1649,6 +2668,7 @@ async def _prepare_zone_contexts_and_calibrations(
         gateway_id=controller.gateway_id,
         entry_identifier=entry_identifier,
     )
+    _cache_weekly_programs(runtime, programs, canonicals)
 
     contexts = _build_zone_contexts(options, programs, canonicals)
     calibrations = _build_zone_calibrations(
@@ -1756,7 +2776,9 @@ def _submit_statistics(
     energy_entity_ids = _energy_sensor_entity_ids(hass, entry, controller)
 
     def _entity_stat_import_writer(
-        hass: HomeAssistant, meta_dict: dict[str, Any], samples: Iterable[dict[str, Any]]
+        hass: HomeAssistant,
+        meta_dict: dict[str, Any],
+        samples: Iterable[dict[str, Any]],
     ) -> None:
         """Import entity-bound statistics using recorder.async_import_statistics."""
 
@@ -1784,6 +2806,7 @@ def _submit_statistics(
                     sum=float(sample["sum"]),
                 )
             )
+
         async def _async_import() -> None:
             try:
                 await instance.async_import_statistics(

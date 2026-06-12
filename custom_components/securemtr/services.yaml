@@ -4,11 +4,12 @@ reset_energy_accumulator:
   fields:
     entry_id:
       name: Entry ID
-      description: Config entry ID of the SecureMTR controller to reset.
+      description: SecureMTR integration entry to reset.
       example: 1234567890abcdef1234567890abcdef
       required: true
       selector:
-        text:
+        config_entry:
+          integration: securemtr
     zone:
       name: Zone
       description: SecureMTR zone to reset. Defaults to the primary zone.
@@ -19,3 +20,69 @@ reset_energy_accumulator:
           options:
             - primary
             - boost
+
+start_timed_boost:
+  name: Start timed boost
+  description: Start a timed boost run for an arbitrary number of minutes.
+  fields:
+    entry_id:
+      name: Entry ID
+      description: SecureMTR integration entry to control.
+      example: 1234567890abcdef1234567890abcdef
+      required: true
+      selector:
+        config_entry:
+          integration: securemtr
+    duration_minutes:
+      name: Duration (minutes)
+      description: Boost duration in minutes (1-1440).
+      example: 45
+      required: true
+      selector:
+        number:
+          min: 1
+          max: 1440
+          mode: box
+          step: 1
+
+set_primary_weekly_schedule:
+  name: Set primary weekly schedule
+  description: Update the primary zone weekly schedule with 15-minute aligned transitions.
+  fields:
+    entry_id:
+      name: Entry ID
+      description: SecureMTR integration entry to control.
+      example: 1234567890abcdef1234567890abcdef
+      required: true
+      selector:
+        config_entry:
+          integration: securemtr
+    schedule:
+      name: Weekly schedule payload
+      description: >-
+        Mapping for monday..sunday where each day contains on/off HH:MM lists,
+        for example {"monday":{"on":["04:45"],"off":["07:45"]}, ... }.
+      required: true
+      selector:
+        object:
+
+set_boost_weekly_schedule:
+  name: Set boost weekly schedule
+  description: Update the boost zone weekly schedule with 15-minute aligned transitions.
+  fields:
+    entry_id:
+      name: Entry ID
+      description: SecureMTR integration entry to control.
+      example: 1234567890abcdef1234567890abcdef
+      required: true
+      selector:
+        config_entry:
+          integration: securemtr
+    schedule:
+      name: Weekly schedule payload
+      description: >-
+        Mapping for monday..sunday where each day contains on/off HH:MM lists,
+        for example {"monday":{"on":["01:45"],"off":["08:45"]}, ... }.
+      required: true
+      selector:
+        object:

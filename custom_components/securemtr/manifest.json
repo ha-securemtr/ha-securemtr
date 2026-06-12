@@ -5,10 +5,16 @@
   "codeowners": [
     "@ha-securemtr"
   ],
+  "bluetooth": [
+    {
+      "service_uuid": "b973f2e0-b19e-11e2-9e96-0800200c9a66",
+      "connectable": true
+    }
+  ],
   "config_flow": true,
-  "dependencies": ["utility_meter"],
+  "dependencies": ["utility_meter", "bluetooth_adapters"],
   "documentation": "https://github.com/ha-securemtr/ha-securemtr#readme",
-  "iot_class": "cloud_push",
+  "iot_class": "local_poll",
   "issue_tracker": "https://github.com/ha-securemtr/ha-securemtr/issues",
   "loggers": [
     "custom_components.securemtr"

@@ -15,12 +15,14 @@ from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.util import dt as dt_util
 
 from . import (
+    CONNECTION_MODE_LOCAL_BLE,
     DOMAIN,
     SecuremtrController,
     SecuremtrRuntimeData,
+    async_get_local_ble_worker,
+    async_refresh_entry_state,
     async_execute_controller_command,
     coerce_end_time,
-    consumption_metrics,
 )
 from .beanbag import BeanbagBackend, BeanbagError, BeanbagSession, WeeklyProgram
 from .entity import (
@@ -110,7 +112,10 @@ class SecuremtrConsumptionMetricsButton(SecuremtrRuntimeEntityMixin, ButtonEntit
         if hass is None:
             raise HomeAssistantError("Home Assistant instance is not available")
 
-        await consumption_metrics(hass, self._entry)
+        await async_refresh_entry_state(hass, self._entry)
+
+        if self._runtime.connection_mode == CONNECTION_MODE_LOCAL_BLE:
+            _LOGGER.info("Triggered local BLE runtime refresh")
 
 
 class SecuremtrLogWeeklyScheduleButton(SecuremtrRuntimeEntityMixin, ButtonEntity):
@@ -134,29 +139,54 @@ class SecuremtrLogWeeklyScheduleButton(SecuremtrRuntimeEntityMixin, ButtonEntity
         runtime = self._runtime
         entry = self._entry
 
-        async def _read_programs(
-            backend: BeanbagBackend,
-            session: BeanbagSession,
-            websocket: ClientWebSocketResponse,
-            controller: SecuremtrController,
-        ) -> tuple[
-            dict[str, WeeklyProgram | None], dict[str, list[tuple[int, int]] | None]
-        ]:
-            controller_label = controller_display_label(controller)
-            return await async_read_zone_programs(
-                backend,
-                session,
-                websocket,
-                gateway_id=controller.gateway_id,
-                entry_identifier=controller_label,
+        if runtime.connection_mode == CONNECTION_MODE_LOCAL_BLE:
+            hass = self.hass
+            if hass is None:
+                raise HomeAssistantError("Home Assistant instance is not available")
+
+            from .local_ble_commissioning import (  # noqa: PLC0415
+                LocalBleCommissioningError,
+                LocalBlePriority,
             )
 
-        programs, canonicals = await async_execute_controller_command(
-            runtime,
-            entry,
-            _read_programs,
-            log_context="Failed to read Secure Meters weekly schedule",
-        )
+            try:
+                worker = await async_get_local_ble_worker(hass, entry, runtime)
+                programs, canonicals = await worker.async_read_local_weekly_programs(
+                    priority=LocalBlePriority.USER_READ,
+                    coalesce_key=None,
+                    zone_bois=runtime.schedule_zone_bois,
+                )
+            except LocalBleCommissioningError as error:
+                _LOGGER.error("Failed to read Secure Meters weekly schedule: %s", error)
+                raise HomeAssistantError(
+                    "Failed to read Secure Meters weekly schedule"
+                ) from error
+        else:
+
+            async def _read_programs(
+                backend: BeanbagBackend,
+                session: BeanbagSession,
+                websocket: ClientWebSocketResponse,
+                controller: SecuremtrController,
+            ) -> tuple[
+                dict[str, WeeklyProgram | None],
+                dict[str, list[tuple[int, int]] | None],
+            ]:
+                controller_label = controller_display_label(controller)
+                return await async_read_zone_programs(
+                    backend,
+                    session,
+                    websocket,
+                    gateway_id=controller.gateway_id,
+                    entry_identifier=controller_label,
+                )
+
+            programs, canonicals = await async_execute_controller_command(
+                runtime,
+                entry,
+                _read_programs,
+                log_context="Failed to read Secure Meters weekly schedule",
+            )
 
         controller = runtime.controller
         if controller is None:  # pragma: no cover - defensive guard

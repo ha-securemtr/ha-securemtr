@@ -7,12 +7,14 @@ from datetime import datetime, timezone
 import logging
 from types import SimpleNamespace
 from typing import Any, Awaitable, Callable
+from unittest.mock import AsyncMock
 
 import pytest
 
 import custom_components.securemtr.entity as securemtr_entity
 import custom_components.securemtr.runtime_helpers as runtime_helpers
 from custom_components.securemtr import (
+    CONNECTION_MODE_LOCAL_BLE,
     DEFAULT_DEVICE_LABEL,
     DOMAIN,
     consumption_metrics,
@@ -444,6 +446,61 @@ async def test_schedule_button_logs_program(caplog: pytest.LogCaptureFixture) ->
 
 
 @pytest.mark.asyncio
+async def test_schedule_button_local_ble_uses_local_reader(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Ensure local BLE schedule logging reads schedules over BLE, not cloud."""
+
+    runtime, backend = _create_runtime()
+    runtime.connection_mode = CONNECTION_MODE_LOCAL_BLE
+    hass = SimpleNamespace(data={DOMAIN: {"entry": runtime}})
+    entry = create_config_entry(
+        entry_id="entry",
+        data={"local_ble_key": "ABEiM0RVZneImaq7zN3u/w=="},
+    )
+    entities: list[ButtonEntity] = []
+
+    weekday = DailyProgram((60, None, None), (120, None, None))
+    weekend = DailyProgram((480, 1020, None), (540, 1320, None))
+    programs = {
+        "primary": (weekday,) * 5 + (weekend,) * 2,
+        "boost": (weekend,) * 7,
+    }
+    canonicals = {
+        "primary": [(60, 120)],
+        "boost": [(480, 540)],
+    }
+
+    fake_worker = SimpleNamespace(
+        async_read_local_weekly_programs=AsyncMock(return_value=(programs, canonicals))
+    )
+    get_worker = AsyncMock(return_value=fake_worker)
+    monkeypatch.setattr(
+        "custom_components.securemtr.button.async_get_local_ble_worker",
+        get_worker,
+    )
+
+    await async_setup_entry(hass, entry, entities.extend)
+
+    schedule_button = next(
+        entity for entity in entities if entity.unique_id.endswith("log_schedule")
+    )
+    local_hass = SimpleNamespace()
+    schedule_button.hass = local_hass
+
+    with caplog.at_level(logging.INFO):
+        await schedule_button.async_press()
+
+    get_worker.assert_awaited_once_with(local_hass, entry, runtime)
+    fake_worker.async_read_local_weekly_programs.assert_awaited_once()
+    read_kwargs = fake_worker.async_read_local_weekly_programs.await_args.kwargs
+    assert read_kwargs["coalesce_key"] is None
+    assert read_kwargs["zone_bois"] is runtime.schedule_zone_bois
+    assert backend.read_calls == []
+
+
+@pytest.mark.asyncio
 async def test_schedule_button_backend_error(caplog: pytest.LogCaptureFixture) -> None:
     """Convert backend read failures into Home Assistant errors."""
 
@@ -828,7 +885,7 @@ async def test_consumption_button_triggers_refresh(
         calls.append((hass_obj, entry_obj))
 
     monkeypatch.setattr(
-        "custom_components.securemtr.button.consumption_metrics", _fake_refresh
+        "custom_components.securemtr.button.async_refresh_entry_state", _fake_refresh
     )
 
     await button.async_press()
@@ -967,3 +1024,57 @@ async def test_consumption_refresh_serializes_with_commands(
     assert submit_calls
     assert update_calls
     assert dispatcher_calls
+
+
+@pytest.mark.asyncio
+async def test_local_boost_button_uses_local_ble_command(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Ensure local-mode boost buttons invoke the BLE command transport."""
+
+    runtime, _backend = _create_runtime()
+    runtime.connection_mode = CONNECTION_MODE_LOCAL_BLE
+    runtime.websocket = None
+
+    entry = create_config_entry(
+        entry_id="entry-local",
+        data={"local_ble_key": "ABEiM0RVZneImaq7zN3u/w=="},
+    )
+    button = SecuremtrTimedBoostButton(runtime, runtime.controller, entry, 30)
+    button.hass = SimpleNamespace()
+
+    fake_worker = SimpleNamespace(async_execute_local_command=AsyncMock(return_value=0))
+    get_worker = AsyncMock(return_value=fake_worker)
+    monkeypatch.setattr(
+        "custom_components.securemtr.entity.async_get_local_ble_worker",
+        get_worker,
+    )
+    monkeypatch.setattr(
+        "custom_components.securemtr.entity.async_dispatch_runtime_update",
+        lambda hass, entry_id: None,
+    )
+
+    await button.async_press()
+
+    get_worker.assert_awaited_once_with(button.hass, entry, runtime)
+    fake_worker.async_execute_local_command.assert_awaited_once()
+    kwargs = fake_worker.async_execute_local_command.await_args.kwargs
+    assert kwargs["method_name"] == "start_timed_boost"
+    assert kwargs["operation_kwargs"] == {"duration_minutes": 30}
+    assert runtime.timed_boost_active is True
+
+
+@pytest.mark.asyncio
+async def test_local_boost_button_requires_stored_ble_key() -> None:
+    """Ensure local-mode commands fail when BLE credentials are absent."""
+
+    runtime, _backend = _create_runtime()
+    runtime.connection_mode = CONNECTION_MODE_LOCAL_BLE
+    runtime.websocket = None
+
+    entry = create_config_entry(entry_id="entry-local", data={})
+    button = SecuremtrTimedBoostButton(runtime, runtime.controller, entry, 30)
+    button.hass = SimpleNamespace()
+
+    with pytest.raises(HomeAssistantError, match="Local BLE key is missing"):
+        await button.async_press()

@@ -17,6 +17,7 @@ from homeassistant.exceptions import ConfigEntryNotReady, HomeAssistantError
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
 from . import DOMAIN, SecuremtrController, SecuremtrRuntimeData
+from . import _format_weekly_program
 from .entity import SecuremtrRuntimeEntityMixin, async_get_ready_controller
 from .zones import ZONE_METADATA, ZoneMetadata
 
@@ -54,7 +55,21 @@ async def async_setup_entry(
     )
 
     sensors: list[SecuremtrSensorEntity] = [
-        SecuremtrBoostEndsSensor(runtime, controller, entry)
+        SecuremtrBoostEndsSensor(runtime, controller, entry),
+        SecuremtrWeeklyScheduleSensor(
+            runtime,
+            controller,
+            entry,
+            zone="primary",
+            translation_key="primary_weekly_schedule",
+        ),
+        SecuremtrWeeklyScheduleSensor(
+            runtime,
+            controller,
+            entry,
+            zone="boost",
+            translation_key="boost_weekly_schedule",
+        ),
     ]
     _LOGGER.debug(
         "Prepared boost end-time sensor %s",
@@ -271,6 +286,80 @@ class SecuremtrEnergyTotalSensor(SecuremtrSensorEntity):
         return attributes or None
 
 
+class SecuremtrWeeklyScheduleSensor(SecuremtrSensorEntity):
+    """Expose a weekly schedule snapshot for one SecureMTR zone."""
+
+    def __init__(
+        self,
+        runtime: SecuremtrRuntimeData,
+        controller: SecuremtrController,
+        entry: ConfigEntry,
+        *,
+        zone: str,
+        translation_key: str,
+    ) -> None:
+        """Initialise the weekly schedule sensor for one zone."""
+
+        super().__init__(runtime, controller, entry)
+        self._zone = zone
+        self._attr_translation_key = translation_key
+        self._set_slug_identifiers(f"{zone}_weekly_schedule")
+
+    @property
+    def available(self) -> bool:
+        """Return whether schedule data is cached or the runtime is connected."""
+
+        if super().available:
+            return True
+        return self._program() is not None
+
+    def _program(self):
+        """Return the cached weekly program for the configured zone."""
+
+        programs = self._runtime.weekly_programs
+        if not isinstance(programs, dict):
+            return None
+        program = programs.get(self._zone)
+        return program if isinstance(program, tuple) and len(program) == 7 else None
+
+    @property
+    def native_value(self) -> int | None:
+        """Return the number of configured transitions for the weekly program."""
+
+        program = self._program()
+        if program is None:
+            return None
+
+        total = 0
+        for day in program:
+            total += len([minute for minute in day.on_minutes if minute is not None])
+            total += len([minute for minute in day.off_minutes if minute is not None])
+        return total
+
+    @property
+    def extra_state_attributes(self) -> dict[str, object] | None:
+        """Return the cached weekly schedule and canonical interval metadata."""
+
+        program = self._program()
+        if program is None:
+            return None
+
+        attributes: dict[str, object] = {
+            "schedule": _format_weekly_program(program),
+        }
+
+        canonicals = self._runtime.weekly_canonicals
+        if isinstance(canonicals, dict):
+            intervals = canonicals.get(self._zone)
+            if isinstance(intervals, list):
+                attributes["canonical_intervals"] = [
+                    {"start_minute": start, "end_minute": end}
+                    for start, end in intervals
+                ]
+
+        return attributes
+
+
 class SecuremtrDailyDurationSensor(SecuremtrSensorEntity):
     """Expose the previous day's runtime or scheduled duration."""
 
@@ -335,4 +424,5 @@ __all__ = [
     "SecuremtrBoostEndsSensor",
     "SecuremtrDailyDurationSensor",
     "SecuremtrEnergyTotalSensor",
+    "SecuremtrWeeklyScheduleSensor",
 ]
