@@ -695,7 +695,7 @@ async def test_backend_read_live_state_parses_primary_power(
                         {
                             "SI": 16,
                             "V": [
-                                {"I": 4, "V": 1},
+                                {"I": 4, "V": 1, "OT": 2, "D": 30},
                                 {"I": 9, "V": 600},
                                 {"I": 27, "V": 1},
                             ],
@@ -724,7 +724,7 @@ async def test_backend_read_live_state_parses_primary_power(
             {
                 "SI": 16,
                 "V": [
-                    {"I": 4, "V": 1},
+                    {"I": 4, "V": 1, "OT": 2, "D": 30},
                     {"I": 9, "V": 600},
                     {"I": 27, "V": 1},
                 ],
@@ -1162,7 +1162,7 @@ def test_extract_timed_boost_state_helpers() -> None:
                 "SI": 16,
                 "V": [
                     {"I": 5, "V": 1},
-                    {"I": 4, "V": 1},
+                    {"I": 4, "V": 1, "OT": 2, "D": 45},
                     {"I": 9, "V": 615},
                     {"I": 27, "V": 1},
                 ],
@@ -1172,6 +1172,7 @@ def test_extract_timed_boost_state_helpers() -> None:
 
     assert backend._extract_timed_boost_active(payload) is True
     assert backend._extract_timed_boost_end_minute(payload) == 615
+    # Boost is signalled by OT == Advance (2), not the on/off V value.
     assert (
         backend._extract_timed_boost_active(
             {"V": [{"SI": 16, "V": [{"I": 4, "V": 0}]}]}
@@ -1180,13 +1181,20 @@ def test_extract_timed_boost_state_helpers() -> None:
     )
     assert (
         backend._extract_timed_boost_active(
-            {"V": [{"SI": 16, "V": [{"I": 4, "V": 7}]}]}
+            {"V": [{"SI": 16, "V": [{"I": 4, "V": 1, "OT": 1}]}]}
         )
-        is None
+        is False
     )
     assert (
         backend._extract_timed_boost_end_minute(
             {"V": [{"SI": 16, "V": [{"I": 9, "V": "oops"}]}]}
+        )
+        is None
+    )
+    # 65535 is the "no scheduled change" sentinel, not a minute-of-day.
+    assert (
+        backend._extract_timed_boost_end_minute(
+            {"V": [{"SI": 16, "V": [{"I": 9, "V": 65535}]}]}
         )
         is None
     )

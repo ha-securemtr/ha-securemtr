@@ -1490,7 +1490,8 @@ class _BleUartRpcClient:
         if not packet:
             return
         packet_index = packet[0]
-        self._response_packets[packet_index] = packet[1:]
+        if packet_index not in self._response_packets:
+            self._response_packets[packet_index] = packet[1:]
         if packet_index == FINAL_PACKET_INDEX:
             self._response_event.set()
 

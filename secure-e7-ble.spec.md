@@ -378,7 +378,7 @@ hot-water boost.
 
 - **HomeAway (Mode characteristic value):** `Off=0, Away=1, Home=2`. "Powered on / home" = **2**, "off" = **0**.
 - **HardwareType:** `BB_Gateway=10, Receiver_2_Channel=53, Receiver_4_Channel=54, NewFW_Receiver_2_Channel=62, NewFW_Receiver_4_Channel=63, E7Plus_2_Channel=65`.
-- **WiFiSecurityTypes:** `None=1, WPA_PSK=2, WEP=3`.
+- **WiFiSecurityTypes:** `Invalid=0, None=1, WPA_PSK=2, WEP=3`.
 - **ModeID:** `Sleep=1, Away=2, Relax=3, HotWater=4`. **OverrideTriggerType:** `None=0, UserAction=1, GeoFencing=2`.
 - **Role:** `Unknown=0, Owner=1, User=2, Guest=3, Installer=4`. **AccessLevel:** `None=0, ViewOnly=1, UpdateOnly=2, All=3`.
 - **MeasurementUnitType:** `Celsius=1, Fahrenheit=2, State=3, Unit=4, Percent=5, …, Watt=11, KWH=12, KVAH=13`.
@@ -390,7 +390,8 @@ hot-water boost.
 - **Durations (`D`):** minutes. `255` is the conventional "cancel / until-cancelled" sentinel for holds.
 - **Energy (ActiveEnergy, I=19):** raw value ÷ 1000 = kWh.
 - **Schedule slot minutes:** minute-of-day 0–1439; sentinel `65535` = empty slot.
-- **Timestamps:** Unix epoch seconds (`DTS`, schedule "next period", etc.).
+- **ScheduleNextPeriod (I=9):** **minute-of-day** 0–1439 (the app renders it as `value/60 : value%60`); sentinel `65535` = none. *Not* an epoch timestamp.
+- **Timestamps:** Unix epoch seconds (`DTS`, `ST`/`ET`/`GT` override times, consumption day `T`).
 
 ---
 
@@ -522,6 +523,7 @@ Every operation below is one JSON-RPC Request: `P = [ {GMI, HI, SI}, args ]`.
 |---|---|---|
 | **Turn controller ON** (mode = home) | 15 *(primary heating)* / 33 *(device-off screen)* | `[boi, {"I":6,"V":2}]` |
 | **Turn controller OFF** | 15 / 33 | `[boi, {"I":6,"V":0}]` |
+| **Set Away mode** | 15 / 33 | `[boi, {"I":6,"V":1}]` *(V = HomeAway: 0 off, 1 away, 2 home)* |
 | **Start / extend timed boost** | 16 | `[boi, {"I":4,"V":0,"OT":2,"D":<minutes>}]` |
 | **Stop timed boost** | 16 | `[boi, {"I":4,"V":0,"OT":2,"D":0}]` |
 | **Enable / disable timed-boost (schedule)** | 16 | `[boi, {"I":27,"V":1|0}]` |
@@ -530,9 +532,11 @@ Every operation below is one JSON-RPC Request: `P = [ {GMI, HI, SI}, args ]`.
 | **Hold temperature for a duration** | 15 | `[boi, {"I":1,"V":<°C×10>,"OT":3,"D":<min>}]` *(D=255 cancels)* |
 | **Set away temperature** | 15 | `[1, {"I":7,"V":<°C×10>}]` |
 
-> Typical boost presets are **30 / 60 / 120** minutes; the protocol accepts any positive
-> minute value. "Boost active" is detected by reading the HotWater `I:4` characteristic and
-> checking **`OT == 2`**; remaining duration is its `D`.
+> Typical boost presets are **30 / 60 / 120** minutes (cancel = `D:0`); temperature-hold
+> presets are **60 / 120 / 180 / 240** minutes (`D:255` cancels). The protocol accepts any
+> positive minute value. "Boost active" is detected by reading the HotWater `I:4`
+> characteristic and checking **`OT == 2`**; remaining duration is its `D`. The boost write
+> addresses the hot-water instance's BOI as resolved from the snapshot.
 >
 > **Mode-write BOI:** the on/off (Mode `I:6`) write is commonly issued with a **hardcoded
 > BOI of `1`** (on Thermostat 15 or Timer 33). A robust client should instead resolve the
@@ -613,7 +617,7 @@ For the E7 Plus 2-channel device the default HAN device list is:
 | HotWater (16) | 27 (ScheduleEnableDisable) | Timed-boost / schedule enable | 1 enabled / 0 disabled |
 | HotWater (16) | 19 (ActiveEnergy) | Boost-zone cumulative energy | kWh = V/1000 |
 | HotWater (16) | 10 (ScheduleNextSetPoint) | Next scheduled state | 1 on / 0 off |
-| HotWater (16) | 9 (ScheduleNextPeriod) | Time of next change | epoch (a max value = none) |
+| HotWater (16) | 9 (ScheduleNextPeriod) | Time of next change | minute-of-day 0–1439 (`65535` = none) |
 | any | 30 (DeviceLock) | Schedule locked | 1 locked |
 
 **Zone resolution:** match services by `SI`; the per-instance `"I"` is the **BOI** you
@@ -668,9 +672,9 @@ Non-normative guidance for robust clients; adopt or ignore per environment.
 - **AES is ECB + zero-pad to 16**, *not* PKCS#7. On receive, decrypt then trim using the
   2-byte length prefix (the zero padding is discarded by the length).
 - **Final packet index is `255`**; normal packets start at `1`; reassemble by ascending index.
-- **`HI=14` overload:** one observed read path reuses `hanmanagement HI=14` (UpgradeDevice)
-  as "get all configuration attributes". Treat as suspect / verify against a real device
-  before relying on it.
+- **`HI=14` overload:** one observed read path reuses `hanmanagement HI=14`
+  (enum name *UpgradeDevice*) as its "get all configuration attributes" read. The name is
+  misleading but the usage is real; still verify against a real device before relying on it.
 - **GMI is decimal**, derived from the hex MAC. Some non-BLE transports use a *reversed* MAC —
   not relevant to BLE.
 
